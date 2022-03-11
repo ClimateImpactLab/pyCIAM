@@ -1,0 +1,51 @@
+{
+    "values": {
+        "capmovefactor": 0.1,
+        "democost": 0.05,
+        "depr": 1,
+        "dr": 0.04,
+        "floodmortality": 0.01,
+        "movefactor": 1,
+        "pcfixedfrac": 0.3,
+        "reactive_retreat_factor": 5,
+        "wall_maintcost": 0.02,
+        "wall_width2height": 1.7,
+        "wmaxrate": 0.01,
+        "at_start": [
+            2000,
+            2010,
+            2050,
+            2100,
+            2150,
+            2190
+        ],
+        "npv_start": 2010,
+        "min_coastland_scale": 0.5,
+        "vsl_ypc_mult": 216,
+        "vsl_inc_elast": 0.5,
+        "min_ypc_scale": 0.9,
+        "ypc_scale_denom": 250,
+        "ypc_scale_elast": 0.05
+    },
+    "descriptions": {
+        "capmovefactor": "Cost to relocate mobile capital as a fraction of asset value",
+        "democost": "Dost to demolish immobile capital as fraction of asset",
+        "depr": "Deprecation fraction of immobile capital on land under planned retreat (Diaz2016=1)",
+        "dr": "Discount rate",
+        "floodmortality": "Floods take 1 in 100 people exposed (per Jonkman Vrijling 2008 Table4) resiliency can reduce this",
+        "movefactor": "Cost to relocate people as a factor of annual income (Diaz2016=1; Tol=3; RMendelsohn=0.5)",
+        "pcfixedfrac": "Fraction of protection cost that is fixed (not variable in height)",
+        "reactive_retreat_factor": "Cost factor of reactive vs planned retreat; non-empirical assumption (Diaz2016=5)",
+        "wall_maintcost": "Annual average seawall maintenance cost, as a fraction of baseline construction cost, default is 2%",
+        "wall_width2height": "Width to height ratio of constructed sea walls for protection, default assumption is of a 60° wall slope",
+        "wmaxrate": "Maximum rate of wetland accretion (m per yr) per Kirwan et al 2010",
+        "at_start": "First year of each adaptation period used in model",
+        "npv_start": "Year in which to begin NPV calculations. Either skip the initial adaptation period as in Diaz2016 (2010) or include the costs of initial adaptation (2010)",
+        "min_coastland_scale": "Minimum coastland value scaling factor to consider based on stylized assumption that populated coastal land more valuable, as much as 2.4x when = 2000ppl/sqkm (1 at 25 ppl/sqkm, 0.75 at 10ppl/sqkm). Taken from Diaz 2016",
+        "vsl_ypc_mult": "VSL is 200x ypc in US per FUND per Cline 1992; US assumes $9.1M which is 216x ypc per Diaz 2016",
+        "vsl_inc_elast": "VSL income elasticity formulation per Viscusi and Aldy 2003",
+        "min_ypc_scale": "Minimum ratio of local coastal GDPpc to national GDPpc",
+        "ypc_scale_denom": "Denominator in ypc = (popdens / denom) ^ elast",
+        "ypc_scale_elast": "Elasticity in ypc = (popdens / denom) ^ elast"
+    }
+}
