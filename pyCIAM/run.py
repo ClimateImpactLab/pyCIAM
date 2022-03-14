@@ -3,10 +3,7 @@ import pandas as pd
 import xarray as xr
 
 from .constants import PLIST, RLIST
-from .surge.calc import (
-    calc_storm_damages_no_resilience,
-    get_surge_heights_probs,
-)
+from .surge.calc import calc_storm_damages_no_resilience, get_surge_heights_probs
 from .surge.damage_funcs import diaz_ddf_i, diaz_dmf_i
 from .utils import get_lslr_plan_data, get_planning_period_map, pos
 

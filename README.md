@@ -17,7 +17,7 @@ This code was developed for Depsky et al. 2022, but our intention is for broader
 `pyCIAM` is available via PyPI and installable via `pip`.
 
 ```bash
-pip install pyciam
+pip install python-CIAM
 ```
 
 Note that currently, package dependencies have not been thoroughly described and must be installed separately by the user. We are working to include dependencies in the package so that all will be included in the `pip install` command.
