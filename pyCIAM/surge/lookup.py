@@ -3,12 +3,9 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from .io import load_lslr_for_ciam, save_to_zarr_region
-from .calc import (
-    calc_storm_damages_no_resilience,
-    get_surge_heights_probs,
-)
+from .calc import calc_storm_damages_no_resilience, get_surge_heights_probs
 from .damage_funcs import diaz_ddf_i, diaz_dmf_i
+from .io import load_lslr_for_ciam, save_to_zarr_region
 from .utils import get_lslr_plan_data, get_planning_period_map, s2d
 
 
