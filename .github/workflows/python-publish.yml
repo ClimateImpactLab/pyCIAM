@@ -24,7 +24,16 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install build
+        pip install build setuptools_scm
+    - name: Create environment variable
+      if: startsWith(github.ref, 'refs/tags/') != true
+      shell: bash
+      run: |
+        source activate $ENV_NAME
+        version=$(awk -F+ '{print $1}' <<< $(python setup.py --version | tail -1))
+        echo "::set-env name=SETUPTOOLS_SCM_PRETEND_VERSION::$version"
+    - name: Check environment variable
+      run: echo $SETUPTOOLS_SCM_PRETEND_VERSION
     - name: Build package
       run: python -m build
     - name: Publish distribution to Test PyPI
