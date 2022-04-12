@@ -2,9 +2,9 @@
 
 pyCIAM is a Python port, including numerous model updates, of the [Coastal Impacts and Adaptation Model](https://github.com/delavane/CIAM), as described in [Diaz 2016](https://link.springer.com/article/10.1007/s10584-016-1675-4#Sec13). This code accompanies Depsky et al. 2022 (in prep.). See the manuscript for further details on model functionality and structure.
 
-`pyCIAM`, like `CIAM`, is a tool to estimate global economic impacts of sea level rise at fine resolution, accounting for adaptation and spatial variability and uncertainty in sea level rise. This model requires a number of socioeconomic and sea level rise inputs, organized by coastal "segment" and elevation. In Depsky et al. 2022, we develop the [SLIIDERS](https://doi.org/10.5281/zenodo.6449231) datasets to serve this purpose; however, users may wish to alter and/or replace these datasets for their own purposes, especially if newer input data (used to generate `SLIIDERS`) becomes available.
+`pyCIAM`, like `CIAM`, is a tool to estimate global economic impacts of sea level rise at fine resolution, accounting for adaptation and spatial variability and uncertainty in sea level rise. This model requires a number of socioeconomic and sea level rise inputs, organized by coastal "segment" and elevation. In Depsky et al. 2022, we develop the [SLIIDERS](https://doi.org/10.5281/zenodo.6449230) datasets to serve this purpose; however, users may wish to alter and/or replace these datasets for their own purposes, especially if newer input data (used to generate `SLIIDERS`) becomes available.
 
-Model outputs consistent with Depsky et al. 2022 are available on Zenodo, with DOI [10.5281/zenodo.6014086](https://doi.org/10.5281/zenodo.6014086)
+Model outputs consistent with Depsky et al. 2022 are available on Zenodo, with DOI [10.5281/zenodo.6014085](https://doi.org/10.5281/zenodo.6014085)
 
 At present, this repository contains both the `pyCIAM` package, along with a Jupyter Notebook-based workflow used to create the outputs of Depsky et al. 2022. In the near future, we will likely extract the workflow into its own repository to isolate the more broadly useful package within this one.
 
@@ -48,7 +48,7 @@ Running pyCIAM takes several stages, outlined below. One additional capability t
 
 #### Obtaining model inputs
 
-pyCIAM depends on inputs describing a variety of socioeconomic and sea level variables across user-defined regions. The [SLIIDERS-ECON](https://doi.org/10.5281/zenodo.6010452) and [SLIIDERS-SLR](https://doi.org/10.5281/zenodo.6012027) datasets have been developed to serve this purpose, but any similarly formatted input dataset will work, if users wish to substitute, for example, alternative projections of economic growth besides the Shared Socioeconomic Pathways. To begin, however, we recommend that users obtain the two SLIIDERS datasets, which can be found at the linked DOIs.
+pyCIAM depends on inputs describing a variety of socioeconomic and sea level variables across user-defined regions. The [SLIIDERS-ECON and SLIIDERS-SLR](https://doi.org/10.5281/zenodo.6449230) datasets have been developed to serve this purpose, but any similarly formatted input dataset will work, if users wish to substitute, for example, alternative projections of economic growth besides the Shared Socioeconomic Pathways. To begin, however, we recommend that users obtain the two SLIIDERS datasets, which can be found at the linked DOI.
 
 #### Parameter specification
 
