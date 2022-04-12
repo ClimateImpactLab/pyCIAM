@@ -1,10 +1,14 @@
 History
 =======
 
+Unreleased
+------
+* Use general Zenodo DOI numbers referencing latest version of each deposit
+
 v1.0.2
 ------
 * Add HISTORY.rst
-* Bump patch number to align with Zenodo deposit pdate
+* Bump patch number to align with Zenodo deposit update
   
 v1.0.1
 ------
