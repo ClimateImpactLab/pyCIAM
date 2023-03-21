@@ -5,6 +5,14 @@ Unreleased
 ------
 * Use general Zenodo DOI numbers referencing latest version of each deposit
 
+v1.1.0
+------
+* Addition of AR6 and Sweet scenarios
+* Addition of `execute_pyciam` wrapper function
+* Updates to SLIIDERS inputs based on reviewer comments
+* General repo hygiene
+* Additional/updated figures/tables/results in `post-processing/pyCIAM-results-figures.ipynb`
+
 v1.0.2
 ------
 * Add HISTORY.rst
