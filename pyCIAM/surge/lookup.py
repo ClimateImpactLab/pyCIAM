@@ -23,10 +23,18 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from .._utils import _get_lslr_plan_data, _get_planning_period_map, _s2d, _str_to_mapper
-from ..io import _load_lslr_for_ciam, save_to_zarr_region
-from ._calc import _calc_storm_damages_no_resilience, _get_surge_heights_probs
-from .damage_funcs import diaz_ddf_i, diaz_dmf_i
+from pyCIAM.io import _load_lslr_for_ciam, save_to_zarr_region
+from pyCIAM.surge._calc import (
+    _calc_storm_damages_no_resilience,
+    _get_surge_heights_probs,
+)
+from pyCIAM.surge.damage_funcs import diaz_ddf_i, diaz_dmf_i
+from pyCIAM.utils import (
+    _get_lslr_plan_data,
+    _get_planning_period_map,
+    _s2d,
+    subset_econ_inputs,
+)
 
 
 def _get_exposure_vars(ds):
@@ -38,8 +46,8 @@ def _get_exposure_vars(ds):
 
 
 def _get_lslr_rhdiff_range(
-    sliiders_econ_store,
-    sliiders_slr_store,
+    sliiders_store,
+    slr_stores,
     seg_var,
     seg_vals,
     at_start,
@@ -50,6 +58,9 @@ def _get_lslr_rhdiff_range(
     scen_mc_filter=None,
     include_cc=True,
     include_ncc=True,
+    slr_0_years=2005,
+    mc_dim="mc_sample_id",
+    storage_options={},
 ):
     """Get the range of lslr and rhdiff that we need to model to cover the full range
     across scenario/mcs. The minimum LSLR value we'll need to model for the purposes of
@@ -59,16 +70,17 @@ def _get_lslr_rhdiff_range(
     maximum experienced at any site in any year for all of the sceanrio/mcs we use in
     the binned LSL dataset."""
 
+    if isinstance(slr_0_years, int):
+        slr_0_years = [slr_0_years] * len(slr_stores)
+    assert len(slr_0_years) == len(slr_stores)
     pc_in = _s2d(
-        xr.open_zarr(sliiders_econ_store, chunks=None).sel({seg_var: seg_vals})
+        xr.open_zarr(
+            str(sliiders_store), chunks=None, storage_options=storage_options
+        ).sel({seg_var: seg_vals})
     )
 
     if interp_years is None:
         interp_years = pc_in.year.values
-
-    # list out which sites are actually used for CIAM segments
-    site_ids = pc_in.SLR_site_id
-    unique_site_ids = np.unique(site_ids)
 
     pc_in.surge_height.load()
     pc_in.gumbel_params.load()
@@ -76,35 +88,48 @@ def _get_lslr_rhdiff_range(
     # get max surge height for this seg-adm
     smax = pc_in.surge_height.isel(return_period=-1)
 
-    lslr = _load_lslr_for_ciam(
-        sliiders_slr_store,
-        unique_site_ids,
-        interp_years=interp_years,
-        scen_mc_filter=scen_mc_filter,
-        include_cc=include_cc,
-        include_ncc=include_ncc,
-    ).sel(site_id=site_ids, drop=True)
+    mins, maxs = [], []
+    for sx, slr_store in enumerate(slr_stores):
+        lslr = _load_lslr_for_ciam(
+            slr_store,
+            pc_in[["seg_lon", "seg_lat"]].to_dataframe(),
+            interp_years=interp_years,
+            scen_mc_filter=scen_mc_filter,
+            include_cc=include_cc,
+            include_ncc=include_ncc,
+            mc_dim=mc_dim,
+            slr_0_year=slr_0_years[sx],
+            storage_options=storage_options,
+            quantiles=quantiles,
+        )
 
-    if quantiles is not None:
-        lslr = lslr.unstack().quantile(quantiles, dim="mc_sample_id")
+        # get the max LSLR experienced
+        max_lslr = lslr.max([d for d in lslr.dims if d != seg_var]).sel(
+            {seg_var: seg_vals}
+        )
 
-    # get the max LSLR experienced
-    max_lslr = lslr.max([d for d in lslr.dims if d != seg_var]).sel({seg_var: seg_vals})
+        # find the min LSLR we need to model. This is the max of "min lslr" and the
+        # lowest elevation in this seg-adm minus the max surge height
+        exp_vars = _get_exposure_vars(pc_in)
+        assert len(exp_vars) == 2
+        min_lslr = pc_in[exp_vars].to_array("tmp").sum("tmp") > 0
+        if min_lslr.sum() == 0:
+            return None
+        min_lslr = pc_in.elev_bounds.sel(bound="lower", drop=True).where(min_lslr).min()
+        min_lslr = np.maximum(
+            lslr.min([d for d in lslr.dims if d != seg_var]), min_lslr - smax
+        )
 
-    # find the min LSLR we need to model. This is the max of "min lslr" and the lowest
-    # elevation in this seg-adm minus the max surge height
-    exp_vars = _get_exposure_vars(pc_in)
-    assert len(exp_vars) == 2
-    min_lslr = pc_in[exp_vars].to_array("tmp").sum("tmp") > 0
-    if min_lslr.sum() == 0:
-        return None
-    min_lslr = pc_in.elev_bounds.sel(bound="lower", drop=True).where(min_lslr).min()
-    min_lslr = np.maximum(
-        lslr.min([d for d in lslr.dims if d != seg_var]), min_lslr - smax
-    )
+        # ensure that max > min to enable interpolation even when no damage is possible
+        max_lslr = max_lslr.where(
+            max_lslr > min_lslr, min_lslr + 0.01 * n_interp_pts_lslr
+        )
 
-    # ensure that max > min to enable interpolation even when no damage is possible
-    max_lslr = max_lslr.where(max_lslr > min_lslr, min_lslr + 0.01 * n_interp_pts_lslr)
+        mins.append(min_lslr)
+        maxs.append(max_lslr)
+
+    min_lslr = xr.concat(mins, dim="tmp").min("tmp")
+    max_lslr = xr.concat(maxs, dim="tmp").max("tmp")
 
     at = _get_planning_period_map(lslr.year, at_start)
 
@@ -142,15 +167,21 @@ def _get_lslr_rhdiff_range(
 
 
 def _create_surge_lookup_skeleton_store(
-    sliiders_econ_store,
+    sliiders_store,
     n_interp_pts_lslr,
     n_interp_pts_rhdiff,
     surge_lookup_store,
     seg_chunksize=1,
     seg_var="seg",
+    seg_var_subset=None,
     force_overwrite=True,
+    storage_options={},
 ):
-    pc_in = xr.open_zarr(sliiders_econ_store)
+    pc_in = subset_econ_inputs(
+        xr.open_zarr(str(sliiders_store), storage_options=storage_options),
+        seg_var,
+        seg_var_subset,
+    )
 
     to_save = xr.DataArray(
         da.empty(
@@ -181,32 +212,41 @@ def _create_surge_lookup_skeleton_store(
         ),
     )
     if force_overwrite:
-        to_save.to_zarr(surge_lookup_store, compute=False, mode="w")
-    elif not surge_lookup_store.fs.isdir(surge_lookup_store.root):
-        to_save.to_zarr(surge_lookup_store, compute=False)
+        to_save.to_zarr(
+            str(surge_lookup_store),
+            compute=False,
+            mode="w",
+            storage_options=storage_options,
+        )
+    elif not surge_lookup_store.is_dir():
+        to_save.to_zarr(
+            str(surge_lookup_store), compute=False, storage_options=storage_options
+        )
     return to_save
 
 
 def _save_storm_dam(
     seg_vals,
     seg_var="seg",
-    sliiders_econ_store=None,
-    sliiders_slr_store=None,
+    sliiders_store=None,
+    slr_stores=None,
     surge_lookup_store=None,
     at_start=np.arange(2000, 2100, 10),
     n_interp_pts_lslr=100,
     n_interp_pts_rhdiff=100,
     ddf_i=diaz_ddf_i,
     dmf_i=diaz_dmf_i,
-    ddf_kwargs={},
-    dmf_kwargs={},
     quantiles=None,
     scen_mc_filter=None,
+    mc_dim="mc_sample_id",
+    start_year=None,
+    slr_0_years=2005,
+    storage_options={},
 ):
     """Function to map over each chunk to run through damage calcs."""
     diff_ranges = _get_lslr_rhdiff_range(
-        sliiders_econ_store,
-        sliiders_slr_store,
+        sliiders_store,
+        slr_stores,
         seg_var,
         seg_vals,
         at_start,
@@ -214,12 +254,15 @@ def _save_storm_dam(
         n_interp_pts_rhdiff,
         quantiles=quantiles,
         scen_mc_filter=scen_mc_filter,
+        mc_dim=mc_dim,
+        slr_0_years=slr_0_years,
+        storage_options=storage_options,
     )
 
     if diff_ranges is None:
-        template = xr.open_zarr(surge_lookup_store, chunks=None).sel(
-            {seg_var: seg_vals}
-        )
+        template = xr.open_zarr(
+            str(surge_lookup_store), chunks=None, storage_options=storage_options
+        ).sel({seg_var: seg_vals})
         template = xr.zeros_like(template)
 
         # these must be unique otherwise interp function will raise error
@@ -235,10 +278,17 @@ def _save_storm_dam(
         )
         if surge_lookup_store is None:
             return template
-        save_to_zarr_region(template, surge_lookup_store)
+        save_to_zarr_region(
+            template, surge_lookup_store, storage_options=storage_options
+        )
         return None
 
-    pc_in = xr.open_zarr(sliiders_econ_store, chunks=None)
+    selectors = {}
+    if start_year is not None:
+        selectors = {"year": slice(start_year, None)}
+    pc_in = xr.open_zarr(
+        str(sliiders_store), chunks=None, storage_options=storage_options
+    ).sel(selectors)
     exp_vars = _get_exposure_vars(pc_in)
     pc_in = (
         pc_in[
@@ -289,8 +339,6 @@ def _save_storm_dam(
                 H,
                 ddf_i,
                 dmf_i,
-                ddf_kwargs=ddf_kwargs,
-                dmf_kwargs=dmf_kwargs,
                 surge_probs=surge_heights_to_model.p,
             ).to_array("costtype")
         )
@@ -306,12 +354,12 @@ def _save_storm_dam(
         return res
 
     # identify which index to save to in template zarr
-    save_to_zarr_region(res, surge_lookup_store)
+    save_to_zarr_region(res, surge_lookup_store, storage_options=storage_options)
 
 
 def create_surge_lookup(
-    sliiders_econ_store,
-    sliiders_slr_store,
+    sliiders_store,
+    slr_stores,
     surge_lookup_store,
     seg_var,
     at_start,
@@ -319,14 +367,17 @@ def create_surge_lookup(
     n_interp_pts_rhdiff,
     ddf_i,
     dmf_i,
-    ddf_kwargs={},
-    dmf_kwargs={},
+    seg_var_subset=None,
+    start_year=None,
+    slr_0_years=2005,
     seg_chunksize=1,
     scen_mc_filter=None,
     quantiles=None,
+    mc_dim="mc_sample_id",
     force_overwrite=False,
     client=None,
     client_kwargs={},
+    storage_options={},
 ):
     """Create a storm surge lookup table which is used to define a linear spline
     function for each region modeled in pyCIAM. This output is not strictly necessary to
@@ -335,14 +386,18 @@ def create_surge_lookup(
 
     Parameters
     ----------
-    sliiders_{econ,slr}_store : Path-like
-        Path to zarr store that contains the SLIIDERS-ECON and SLIIDERS-SLR datasets (or
-        ones formatted similarly. May be a :py:class:`fsspec.FSMap` object.
+    sliiders_store : Path-like
+        Path to zarr store that contains the SLIIDERS dataset (or one formatted
+        similarly.
+    slr_stores : list of Path-like
+        List of paths of datasets containing SLR data, indexed by `mc_dim`. The outer
+        bounds of these datasets will be used to determine the bounds of the surge
+        lookup table
     surge_lookup_store : Path-like
         Path to the output zarr store that will contain the lookup table used to build
         the 2D linear spline function. May be a :py:class:`fsspec.FSMap` object.
     seg_var : str
-        The name of the dimension in the SLIIDERS-ECON zarr store specifying each
+        The name of the dimension in the SLIIDERS zarr store specifying each
         *region* to be modeled by pyCIAM. Each region must be nested within each coastal
         segment that serves as an independent decision-making agent, and regions may be
         equivalent to segments. The reason you may wish to have nested regions is to
@@ -364,17 +419,29 @@ def create_surge_lookup(
     {ddf,dmf}_i : function
         Functions defining integrals of the depth-damage and depth-mortality functions
         used to calculate losses from extreme sea levels.
+    seg_var_subset : str, optional
+        If not None (default), will only process segment/admin unit intersection names
+        that contain this string. i.e. you can pass "_USA" to only process seg/admin
+        intersections in the US.
+    start_year : int, optional
+        If not None, drop SLIIDERS years prior to this value.
+    slr_0_year : int, default 2005
+        The reference year for the SLR data, i.e. SLR is assumed to be 0 in this year.
     seg_chunksize : int, default 1
         How many regions to process at once. Larger numbers improve efficiency through
         better vectorization but increase memory footprint.
     scen_mc_filter : :py:class:`pandas.MultiIndex`, optional
-        A list of paired `scenario` (str) and `mc_sample_id` (int) values that
-        specify a subset of the individual SLR trajectories contained in the zarr store
-        at `sliiders_slr_store`. If None, run all scenario X MC sample combinations.
+        A list of paired `scenario` (str) and Monte Carlo (int) values that specify a
+        subset of the individual SLR trajectories contained in the zarr store at
+        `slr_store`. If None, run all scenario X MC sample combinations.
     quantiles : array_like, optional
         If not None, run only specified quantiles of SLR per year, per location, and per
-        scenario, across the `mc_sample_id` dimension of the zarr store located at
-        `sliiders_slr_store`. If None, run all individual Monte Carlo samples.
+        scenario, across the monte carlo dimension of the zarr store located at
+        `slr_store`. If None, run all individual Monte Carlo samples.
+    mc_dim : str, default "mc_sample_id"
+        Name of the dimension that indexes individual SLR scenarios, commonly either
+        Monte Carlo samples or pre-computed quantiles of SLR (if you don't want to
+        compute quantiles on the fly with the `quantiles` kwarg).
     force_overwrite : bool, default False
         Whether to raise an error (True) or overwrite if `surge_lookup_store` already
         contains an existing zarr store.
@@ -382,27 +449,26 @@ def create_surge_lookup(
         A dask.distributed Client object that will be used to parallelize the table
         generation process. If not specifiec, outputs will be generated using a single
         processor in series.
+    client_kwargs : dict, optional
+        Passed directly to `client.map` when mapping functions over a dask cluster.
+    storage_options : dict, optional
+        Passed to :py:function:`xarray.open_zarr`
 
     Returns
     -------
     Returns None, but saves storm surge lookup table to `surge_lookup_store`.
     """
 
-    sliiders_econ_store, sliiders_slr_store, surge_lookup_store = list(
-        map(
-            _str_to_mapper,
-            [sliiders_econ_store, sliiders_slr_store, surge_lookup_store],
-        )
-    )
-
     to_save = _create_surge_lookup_skeleton_store(
-        sliiders_econ_store,
+        sliiders_store,
         n_interp_pts_lslr,
         n_interp_pts_rhdiff,
         surge_lookup_store,
         seg_chunksize=seg_chunksize,
         seg_var=seg_var,
+        seg_var_subset=seg_var_subset,
         force_overwrite=force_overwrite,
+        storage_options=storage_options,
     )
     all_segs = to_save[seg_var].values
     seg_grps = [
@@ -418,18 +484,20 @@ def create_surge_lookup(
             _save_storm_dam,
             seg_grps,
             seg_var=seg_var,
-            sliiders_econ_store=sliiders_econ_store,
-            sliiders_slr_store=sliiders_slr_store,
+            sliiders_store=sliiders_store,
+            slr_stores=slr_stores,
             surge_lookup_store=surge_lookup_store,
             at_start=at_start,
             n_interp_pts_lslr=n_interp_pts_lslr,
             n_interp_pts_rhdiff=n_interp_pts_rhdiff,
+            mc_dim=mc_dim,
             ddf_i=ddf_i,
             dmf_i=dmf_i,
             quantiles=quantiles,
             scen_mc_filter=scen_mc_filter,
-            ddf_kwargs=ddf_kwargs,
-            dmf_kwargs=dmf_kwargs,
+            start_year=start_year,
+            slr_0_years=slr_0_years,
+            storage_options=storage_options,
             **client_kwargs,
         )
     )

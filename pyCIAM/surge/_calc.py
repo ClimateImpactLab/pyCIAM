@@ -5,7 +5,7 @@ import numpy as np
 import xarray as xr
 from scipy.stats import gumbel_r
 
-from .damage_funcs import diaz_ddf_i, diaz_dmf_i
+from pyCIAM.surge.damage_funcs import diaz_ddf_i, diaz_dmf_i
 
 
 def _get_surge_heights_probs(
@@ -66,8 +66,6 @@ def _calc_storm_capital_and_mortality(
     template,
     ddf_i=diaz_ddf_i,
     dmf_i=diaz_dmf_i,
-    ddf_kwargs={},
-    dmf_kwargs={},
 ):
     min_ht = np.maximum(bin_bounds.sel(bound="lower", drop=True), R)
     max_ht = np.maximum(bin_bounds.sel(bound="upper", drop=True), R)
@@ -76,14 +74,10 @@ def _calc_storm_capital_and_mortality(
     del min_ht, max_ht
 
     storm_capital = (
-        (ddf_i(depth_st, depth_end, **ddf_kwargs) * exp_dens.K)
-        .where(depth_end > 0)
-        .sum("elev")
+        (ddf_i(depth_st, depth_end) * exp_dens.K).where(depth_end > 0).sum("elev")
     )
     storm_mortality = (
-        (dmf_i(depth_st, depth_end, **dmf_kwargs) * exp_dens.pop)
-        .where(depth_end > 0)
-        .sum("elev")
+        (dmf_i(depth_st, depth_end) * exp_dens.pop).where(depth_end > 0).sum("elev")
     )
 
     return (
@@ -101,8 +95,6 @@ def _calc_storm_damages_no_resilience(
     H,
     ddf_i,
     dmf_i,
-    ddf_kwargs={},
-    dmf_kwargs={},
     stack=False,
     surge_probs=None,
 ):
@@ -132,8 +124,6 @@ def _calc_storm_damages_no_resilience(
             valid,
             ddf_i=ddf_i,
             dmf_i=dmf_i,
-            ddf_kwargs=ddf_kwargs,
-            dmf_kwargs=dmf_kwargs,
         )
     else:
         init_da = xr.zeros_like(valid)
@@ -160,8 +150,6 @@ def _calc_storm_damages_no_resilience(
                     valid.sel(surge_height=h, drop=True),
                     ddf_i=ddf_i,
                     dmf_i=dmf_i,
-                    ddf_kwargs=ddf_kwargs,
-                    dmf_kwargs=dmf_kwargs,
                 )
                 * this_surge_probs
             )

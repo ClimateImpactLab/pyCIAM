@@ -49,7 +49,7 @@ def diaz_ddf_i(depth_st, depth_end):
     return depth_end - depth_st + np.log(depth_st + 1) - np.log(depth_end + 1)
 
 
-def diaz_dmf_i(depth_st, depth_end, floodmortality=None):
+def diaz_dmf_i(depth_st, depth_end, floodmortality=0.01):
     """Integral of mortality damage function as used in Diaz 2016, assuming unit
     resilience (:math:`\rho`). It is just a constant fraction conditional on a unit of exposure being inundated. Note that kwargs are not optional and will raise an error
     if not specified when called.

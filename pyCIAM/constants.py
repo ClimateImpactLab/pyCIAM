@@ -5,7 +5,7 @@ Constants
     RLIST : list of str
         List of the discrete retreat options, corresponding to different return heights
         of extreme sea level. Other than ``1``, the suffixes in this list must be included
-        in the `surge_heights` coordinates of SLIIDERS-ECON (or a similarly formatted
+        in the `surge_heights` coordinates of SLIIDERS (or a similarly formatted
         dataset).
     PLIST : list of str
         Same as RLIST except for protection. pyCIAM does not allow for protection to the

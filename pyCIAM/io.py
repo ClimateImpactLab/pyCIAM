@@ -7,23 +7,36 @@ Functions
     load_diaz_inputs
 """
 
+from collections.abc import Iterable
+
 import dask.array as da
 import numpy as np
 import pandas as pd
+import pint_xarray  # noqa: F401
 import xarray as xr
 
-from ._utils import _s2d
+from pyCIAM.utils import spherical_nearest_neighbor as snn
+
+from .utils import _s2d
 
 
-def prep_sliiders(input_store, seg_vals, constants={}, seg_var="seg_adm", selectors={}):
-    """Import the SLIIDERS-ECON dataset (or a different dataset formatted analogously),
+def prep_sliiders(
+    input_store,
+    seg_vals,
+    constants={},
+    seg_var="seg_adm",
+    selectors={},
+    calc_popdens_with_wetland_area=True,
+    storage_options={},
+):
+    """Import the SLIIDERS dataset (or a different dataset formatted analogously),
     format, and calculate derived variables so that it can be used by the functions that
     implement pyCIAM.
 
     Parameters
     ----------
     input_store : Path-like
-        Path to zarr store that contains the SLIIDERS-ECON dataset (or one formatted
+        Path to zarr store that contains the SLIIDERS dataset (or one formatted
         similarly. May be a :py:class:`fsspec.FSMap` object.
     seg_vals : list of str
         Defines the subset of regions (along dimension `seg_var`) that the function
@@ -37,9 +50,15 @@ def prep_sliiders(input_store, seg_vals, constants={}, seg_var="seg_adm", select
         subset using `seg_vals`
     selectors : dict
         Defines additional dimensions and values with which to subset `input_store`.
-        For example, the `ssp` dimension in SLIIDERS-ECON defines different
+        For example, the `ssp` dimension in SLIIDERS defines different
         Shared Socioeconomic Pathways (SSPs). If you only wish to proocess SSP2, you
         could specify ``selectors={"ssp": "SSP2"}``.
+    calc_popdens_with_wetland_area : bool, default True
+        If True, assume that population can also exist in Wetland area. This is
+        observed empirically, but presumably at a lower density. Diaz 2016 assumes False
+        but Depsky 2023 assumes True.
+    storage_options : dict, optional
+        Passed to :py:function:`xarray.open_zarr`
 
     Returns
     -------
@@ -51,27 +70,32 @@ def prep_sliiders(input_store, seg_vals, constants={}, seg_var="seg_adm", select
     -----
     * Most often, you will want to use the py:func:`.load_ciam_inputs` function, which
       calls py:func:`.io.prep_sliiders` under the hood.
-    * The SLIIDERS-ECON-like dataset may contain cross-sectional variables
+    * The SLIIDERS-like dataset may contain cross-sectional variables
       reflecting the geographic and elevational distribution of exposure in a certain
       year (`pop_YYYY` and `K_YYYY`) plus scaling variables to define how these evolve
-      over time (`pop_scale` and `K_scale`). This is how  SLIIDERS-ECON 1.0 is
-      constructed because it does not consider within-segment migration across elevation slices in its reference socioeconomic trajectories (i.e. in the absence of SLR).
+      over time (`pop_scale` and `K_scale`). This is how  SLIIDERS 1.0 is
+      constructed because it does not consider within-segment migration across elevation
+      slices in its reference socioeconomic trajectories (i.e. in the absence of SLR).
       An alternative specification that this function will handle is one in which `pop`
       and `K` variables within the input dataset explicitly provide estimates of
-      exposure for each year, scenario, segment, and elevation. This allows for more flexible assumptions regarding future internal migration but has two drawbacks.
+      exposure for each year, scenario, segment, and elevation. This allows for more
+      flexible assumptions regarding future internal migration but has two drawbacks.
       First, the size of the input dataset is greatly increased. Second, if using pyCIAM
       in "probabilistic" mode, in which you utilize a 2D spline function created by
-      :py:func:`.create_surge_lookup`, you must specify a separate lookup table for each scenario and year rather than using just one table.
+      :py:func:`.create_surge_lookup`, you must specify a separate lookup table for each
+      scenario and year rather than using just one table.
     """
-    inputs_all = xr.open_zarr(input_store, chunks=None).sel(selectors, drop=True)
+    inputs_all = xr.open_zarr(
+        str(input_store), chunks=None, storage_options=storage_options
+    ).sel(selectors, drop=True)
 
     inputs = inputs_all.sel({seg_var: seg_vals})
-    inputs = _s2d(inputs).assign(constants)
+    inputs = _s2d(inputs).assign(constants.to_dict())
 
     # assign country level vars to each segment
     for v in inputs.data_vars:
         if "country" in inputs[v].dims:
-            inputs[v] = inputs[v].sel(country=inputs.seg_country, drop=True)
+            inputs[v] = inputs[v].sel(country=inputs.seg_country).drop("country")
 
     if "vsl" not in inputs.data_vars:
         if "ref_income" in inputs:
@@ -99,10 +123,13 @@ def prep_sliiders(input_store, seg_vals, constants={}, seg_var="seg_adm", select
         inputs["K"] = inputs[K_var] * inputs.K_scale
         inputs = inputs.drop(K_var)
     if "dfact" not in inputs.data_vars:
-        inputs["dfact"] = (1 / (1 + inputs.dr)) ** (inputs.year - inputs.year.min())
+        inputs["dfact"] = (1 / (1 + inputs.dr)) ** (inputs.year - inputs.npv_start)
 
     if "landrent" or "ypc" not in inputs.data_vars:
-        popdens = (inputs.pop / inputs.landarea).fillna(0)
+        area = inputs.landarea
+        if calc_popdens_with_wetland_area:
+            area = area + inputs.wetland
+        popdens = (inputs.pop / area).fillna(0)
         if "landrent" not in inputs.data_vars:
             coastland_scale = np.minimum(
                 1,
@@ -137,51 +164,73 @@ def prep_sliiders(input_store, seg_vals, constants={}, seg_var="seg_adm", select
     )
 
 
-def _load_scenario_mc(slr_store, include_ncc=True, include_cc=True):
+def _load_scenario_mc(
+    slr_store,
+    mc_dim="mc_sample_id",
+    include_ncc=True,
+    include_cc=True,
+    quantiles=None,
+    ncc_name="ncc",
+    storage_options={},
+):
+    scen_mc_filter = xr.open_zarr(
+        str(slr_store), chunks=None, storage_options=storage_options
+    )[["scenario", mc_dim]]
+    if quantiles is not None:
+        if mc_dim == "quantile":
+            scen_mc_filter = scen_mc_filter.sel(quantile=quantiles)
+        else:
+            scen_mc_filter = scen_mc_filter.quantile(quantiles, dim=mc_dim)
+
     scen_mc_filter = (
-        xr.open_zarr(slr_store, chunks=None)[["scenario", "mc_sample_id"]]
-        .to_dataframe()
-        .sort_values(["scenario", "mc_sample_id"])
-        .index
+        scen_mc_filter.to_dataframe().sort_values(["scenario", mc_dim]).index
     )
 
     if include_ncc:
         scen_mc_filter = scen_mc_filter.append(
             pd.MultiIndex.from_product(
                 (
-                    ["ncc"],
-                    scen_mc_filter.get_level_values("mc_sample_id")
-                    .unique()
-                    .sort_values(),
+                    [ncc_name],
+                    scen_mc_filter.get_level_values(mc_dim).unique().sort_values(),
                 ),
-                names=["scenario", "mc_sample_id"],
+                names=["scenario", mc_dim],
             )
         )
 
     if not include_cc:
         scen_mc_filter = scen_mc_filter[
-            scen_mc_filter.get_level_values("scenario") == "ncc"
+            scen_mc_filter.get_level_values("scenario") == ncc_name
         ]
     return scen_mc_filter
 
 
 def _load_lslr_for_ciam(
     slr_store,
-    site_id,
+    lonlats,
     interp_years=None,
     scen_mc_filter=None,
     include_ncc=True,
     include_cc=True,
+    mc_dim="mc_sample_id",
+    lsl_var="lsl_msl05",
+    lsl_ncc_var="lsl_ncc_msl05",
+    ncc_name="ncc",
+    slr_0_year=2005,
+    storage_options={},
+    quantiles=None,
 ):
-
     if scen_mc_filter is None:
         scen_mc_filter = _load_scenario_mc(
             slr_store,
             include_ncc=include_ncc,
             include_cc=include_cc,
+            mc_dim=mc_dim,
+            storage_options=storage_options,
+            quantiles=quantiles,
+            ncc_name=ncc_name,
         )
 
-    wcc = scen_mc_filter.get_level_values("scenario") != "ncc"
+    wcc = scen_mc_filter.get_level_values("scenario") != ncc_name
     scen_mc_ncc = scen_mc_filter[~wcc].droplevel("scenario").values
     scen_mc_xr_wcc = (
         scen_mc_filter[wcc]
@@ -191,33 +240,53 @@ def _load_lslr_for_ciam(
         .to_xarray()
     )
 
+    slr = xr.open_zarr(str(slr_store), chunks=None, storage_options=storage_options)
+
+    # select the nearest SLR locations to the passed locations
     slr = _s2d(
-        xr.open_zarr(slr_store, chunks=None)[["lsl_msl00", "lsl_ncc_msl00"]].sel(
-            site_id=site_id, drop=True
-        )
+        slr.sel(site_id=get_nearest_slrs(slr, lonlats).to_xarray()).drop("site_id")
     ).drop(["lat", "lon"], errors="ignore")
 
     # select only the scenarios we wish to model
     if len(scen_mc_xr_wcc.scen_mc):
-        slr_out = slr.lsl_msl00.sel(
-            scenario=scen_mc_xr_wcc.scenario, mc_sample_id=scen_mc_xr_wcc.mc_sample_id
-        ).set_index(scen_mc=["scenario", "mc_sample_id"])
+        slr_out = (
+            slr[lsl_var]
+            .sel({"scenario": scen_mc_xr_wcc.scenario, mc_dim: scen_mc_xr_wcc[mc_dim]})
+            .set_index(scen_mc=["scenario", mc_dim])
+        )
     else:
-        slr_out = xr.DataArray([], dims=("scen_mc",), coords={"scen_mc": []})
+        slr_out = xr.DataArray(
+            [],
+            dims=("scen_mc",),
+            coords={
+                "scen_mc": pd.MultiIndex.from_tuples([], names=["scenario", mc_dim])
+            },
+        )
 
     if len(scen_mc_ncc):
         slr_ncc = (
-            slr.lsl_ncc_msl00.sel(mc_sample_id=scen_mc_ncc)
-            .expand_dims(scenario=["ncc"])
-            .stack(scen_mc=["scenario", "mc_sample_id"])
+            slr[lsl_ncc_var]
+            .sel({mc_dim: scen_mc_ncc})
+            .expand_dims(scenario=[ncc_name])
+            .stack(scen_mc=["scenario", mc_dim])
         )
         slr_out = xr.concat((slr_out, slr_ncc), dim="scen_mc").sel(
             scen_mc=scen_mc_filter
         )
 
+    if "units" in slr_out.attrs:
+        ix_names = slr_out.indexes["scen_mc"].names
+        # hack to avoid pint destroying multi-indexed coords
+        slr_out = (
+            slr_out.pint.quantify()
+            .pint.to("meters")
+            .pint.dequantify()
+            .set_index(scen_mc=ix_names)
+        )
+
     # interpolate to yearly
     slr_out = slr_out.reindex(
-        year=np.concatenate(([2000], slr.year.values)),
+        year=np.concatenate(([slr_0_year], slr.year.values)),
         fill_value=0,
     )
 
@@ -307,6 +376,7 @@ def check_finished_zarr_workflow(
     varname=None,
     final_selector={},
     mask=None,
+    storage_options={},
 ):
     """Check if a workflow that writes to a particular region of a zarr store has
     already run. This is useful when running pyCIAM in "probabilistic" mode across a
@@ -349,6 +419,8 @@ def check_finished_zarr_workflow(
         Mask to use before checking for all non-null values. Mask is applied to both the
         store at `finalstore` and `tmpstore`. `final_selector`, if specified, is
         applied to `finalstore` before `mask`.
+    storage_options : dict, optional
+        Passed to :py:function:`xarray.open_zarr`
 
     Returns
     -------
@@ -361,9 +433,9 @@ def check_finished_zarr_workflow(
     finished = False
     temp = False
     if finalstore is not None:
-        finished = xr.open_zarr(finalstore, chunks=None)[varname].sel(
-            final_selector, drop=True
-        )
+        finished = xr.open_zarr(
+            str(finalstore), chunks=None, storage_options=storage_options
+        )[varname].sel(final_selector, drop=True)
         if mask is not None:
             finished = finished.where(mask, 1)
         finished = finished.notnull().all().item()
@@ -372,7 +444,9 @@ def check_finished_zarr_workflow(
     if tmpstore is not None:
         if tmpstore.fs.isdir(tmpstore.root):
             try:
-                temp = xr.open_zarr(tmpstore, chunks=None)
+                temp = xr.open_zarr(
+                    str(tmpstore), chunks=None, storage_options=storage_options
+                )
                 if mask is not None:
                     temp = temp.where(mask, 1)
                 if (
@@ -386,7 +460,7 @@ def check_finished_zarr_workflow(
     return finished
 
 
-def save_to_zarr_region(ds_in, store, already_aligned=False):
+def save_to_zarr_region(ds_in, store, already_aligned=False, storage_options={}):
     """Wrapper around :py:method:`xarray.Dataset.to_zarr` when specifying the `region`
     kwarg. This function allows you to avoid boilerplate to figure out the integer slice
     objects needed to pass as `region` when calling `:py:meth:xarray.Dataset.to_zarr`.
@@ -401,6 +475,8 @@ def save_to_zarr_region(ds_in, store, already_aligned=False):
         If True, assume that the coordinates of `ds_in` are already ordered the same
         way as those of `store`. May save some computation, but will miss-attribute
         values to coordinates if set to True when coords are not aligned.
+    storage_options : dict, optional
+        Passed to :py:function:`xarray.open_zarr`
 
     Returns
     -------
@@ -414,7 +490,7 @@ def save_to_zarr_region(ds_in, store, already_aligned=False):
         AssertionError
             If any coordinate values of `ds_in` are not contiguous within `store`.
     """
-    ds_out = xr.open_zarr(store, chunks=None)
+    ds_out = xr.open_zarr(str(store), chunks=None, storage_options=storage_options)
 
     # convert dataarray to dataset if needed
     if isinstance(ds_in, xr.DataArray):
@@ -453,7 +529,28 @@ def save_to_zarr_region(ds_in, store, already_aligned=False):
     if not already_aligned:
         ds_in = ds_in.sel(alignment_dims)
 
-    ds_in.drop_vars(ds_in.coords).to_zarr(store, region=regions)
+    ds_in.drop_vars(ds_in.coords).to_zarr(
+        str(store), region=regions, storage_options=storage_options
+    )
+
+
+def get_nearest_slrs(slr_ds, lonlats, x1="seg_lon", y1="seg_lat"):
+    unique_lonlats = lonlats[[x1, y1]].drop_duplicates()
+    slr_lonlat = slr_ds[["lon", "lat"]].to_dataframe()
+    outputs = snn(unique_lonlats, slr_lonlat, x1=x1, y1=y1)
+    return lonlats.join(
+        unique_lonlats.join(outputs.rename("ids")).set_index([x1, y1]),
+        on=[x1, y1],
+    ).ids
+
+
+def add_nearest_slrs(sliiders_ds, slr_ds):
+    """Add a variable to ``sliiders_ds`` called `SLR_site_id` that contains the nearest
+    SLR site to each segment."""
+    sliiders_lonlat = sliiders_ds[["seg_lon", "seg_lat"]].to_dataframe()
+    return sliiders_ds.assign(
+        SLR_site_id=get_nearest_slrs(slr_ds, sliiders_lonlat).to_xarray()
+    )
 
 
 def load_ciam_inputs(
@@ -461,6 +558,7 @@ def load_ciam_inputs(
     slr_store,
     params,
     seg_vals,
+    slr_names=None,
     seg_var="seg",
     surge_lookup_store=None,
     ssp=None,
@@ -468,23 +566,32 @@ def load_ciam_inputs(
     scen_mc_filter=None,
     include_ncc=True,
     include_cc=True,
+    mc_dim="mc_sample_id",
+    quantiles=None,
+    storage_options={},
 ):
     """Load, process, and format all inputs needed to run pyCIAM.
 
     Parameters
     ----------
     input_store : Path-like
-        Path to zarr store that contains the SLIIDERS-ECON dataset (or one formatted
-        similarly. May be a :py:class:`fsspec.FSMap` object.
-    slr_store : Path-like
-        Path to zarr store that contains the SLIIDERS-SLR dataset (or one formatted
-        similarly. May be a :py:class:`fsspec.FSMap` object.
+        Path to zarr store that contains the SLIIDERS dataset (or one formatted
+        similarly.
+    slr_store : Path-like or Iterable
+        Path to zarr store that contains an SLR dataset. May be an iterable to
+        concatenate multiple independent SLR datasets.
     params : dict
         Dictionary of model parameters, typically loaded from a JSON file. See
         :file:`../params.json` for an example of the required parameters.
     seg_vals : list of str
         Defines the subset of regions (along dimension `seg_var`) that the function
         will prep. Subsets are used to run CIAM in parallel.
+    slr_names : list of str, optional
+        If `slr_store` is a list of multiple SLR datasets, this must be a list of the
+        same length providing names for each SLR dataset. This is used as a suffix for
+        the "no-climate-change" scenarios, in case these differ for each dataset. i.e.
+        the no-climate-change scenario for a dataset called "ar6" will be "ncc_ar6".
+        Ignored is `slr_store` is not an iterable.
     seg_var : str, default "seg_var"
         The name of the dimension in `input_store` along which the function will
         subset using `seg_vals`
@@ -497,15 +604,15 @@ def load_ciam_inputs(
         scenario, and SLR trajectory.
     ssp : str or list, optional
         If specified, load only the Shared Socioeconomic Pathways socioeconomic
-        scenarios from SLIIDERS-ECON. If using a similarly-formatted socioeconomic
+        scenarios from SLIIDERS. If using a similarly-formatted socioeconomic
         variable dataset, this will raise a ValueError if specified and if `ssp` is
         not a dimension of the dataset. If None, ignore the `ssp` dimension (i.e. if
         the dimension exists in the dataset, load all SSPs).
     iam : {"IIASA", "OECD", None}, default None
         If specified, load only the version of GDP growth for each loaded SSP
         corresponding to the specified Integrated Assessment Model. If not specified and
-        if using SLIIDERS-ECON, load both IAMs. If using a different dataset without the
-        `iam` dimension, ignore this dimension. If not using SLIIDERS-ECON, this will
+        if using SLIIDERS, load both IAMs. If using a different dataset without the
+        `iam` dimension, ignore this dimension. If not using SLIIDERS, this will
         raise a ValueError if specified and if `iam` is not a dimension of the
         dataset.
     scen_mc_filter : :py:class:`pandas.MultiIndex`, optional
@@ -520,6 +627,15 @@ def load_ciam_inputs(
         trajectories in SLIIDERS-SLR (or a similarly formatted input dataset). Set to
         False when running the pyCIAM "spinup" period, in which initial adaptation is
         estimated through optimizing in the no-climate change scenario.
+    mc_dim : str, default "mc_sample_id"
+        Name of the dimension that indexes individual SLR scenarios, commonly either
+        Monte Carlo samples or quantiles of SLR.
+    quantiles : list of float, optional
+        If not None, take these quantiles of the `mc_dim` dimension. If `mc_dim` =
+        "quantiles", then just select these values. Otherwise take quantiles over the
+        full set of simulations.
+    storage_options : dict, optional
+        Passed to :py:function:`xarray.open_zarr`
 
     Returns
     -------
@@ -537,7 +653,7 @@ def load_ciam_inputs(
         If `ssp` or `iam` is specified and the corresponding variables are not
         present in the Zarr store located at `input_store`.
     """
-    selectors = {}
+    selectors = {"year": slice(params.model_start, None)}
     if ssp is not None:
         selectors["ssp"] = ssp
     if iam is not None:
@@ -545,9 +661,12 @@ def load_ciam_inputs(
     inputs = prep_sliiders(
         input_store,
         seg_vals,
-        constants=params,
+        # dropping the "refA_scenario_selectors" b/c this doesn't need to be added to
+        # the input dataset object
+        constants=params[params.map(type) != dict],
         seg_var=seg_var,
         selectors=selectors,
+        storage_options=storage_options,
     )
 
     if seg_var != "seg":
@@ -557,34 +676,50 @@ def load_ciam_inputs(
     # get surge lookup table
     if surge_lookup_store is not None:
         surge = (
-            xr.open_zarr(surge_lookup_store, chunks=None)
+            xr.open_zarr(
+                str(surge_lookup_store), chunks=None, storage_options=storage_options
+            )
             .sel({seg_var: seg_vals})
-            .rename({seg_var: "seg"})
             .load()
         )
+        if seg_var != "seg":
+            surge = surge.rename({seg_var: "seg"})
     else:
         surge = None
 
     # get SLR
-    site_ids = inputs.SLR_site_id.values
-    slr = (
-        _load_lslr_for_ciam(
-            slr_store,
-            np.unique(site_ids),
-            interp_years=inputs.year.values,
-            scen_mc_filter=scen_mc_filter,
-            include_ncc=include_ncc,
-            include_cc=include_cc,
-        )
-        .sel(site_id=site_ids)
-        .rename(site_id="seg")
+    if not isinstance(slr_store, (list, np.ndarray, tuple, set)):
+        slr_store = [slr_store]
+        ncc_names = ["ncc"]
+    else:
+        ncc_names = ["ncc_" + s for s in slr_names]
+
+    slr = xr.concat(
+        [
+            _load_lslr_for_ciam(
+                s,
+                inputs[["seg_lon", "seg_lat"]].to_dataframe(),
+                interp_years=inputs.year.values,
+                slr_0_year=params.slr_0_year,
+                scen_mc_filter=scen_mc_filter,
+                include_ncc=include_ncc,
+                include_cc=include_cc,
+                ncc_name=ncc_names[sx],
+                mc_dim=mc_dim,
+                quantiles=quantiles,
+                storage_options=storage_options,
+            )
+            for sx, s in enumerate(slr_store)
+        ],
+        dim="scen_mc",
     )
-    slr["seg"] = seg_vals
 
     return inputs, slr, surge
 
 
-def load_diaz_inputs(input_store, seg_vals, params, include_ncc=True, include_cc=True):
+def load_diaz_inputs(
+    input_store, seg_vals, params, include_ncc=True, include_cc=True, storage_options={}
+):
     """Load the original inputs used in Diaz 2016.
 
     Parameters
@@ -608,6 +743,9 @@ def load_diaz_inputs(input_store, seg_vals, params, include_ncc=True, include_cc
         trajectories in SLIIDERS-SLR (or a similarly formatted input dataset). Set to
         False when running the pyCIAM "spinup" period, in which initial adaptation is
         estimated through optimizing in the no-climate change scenario.
+    storage_options : dict, optional
+        Passed to :py:function:`xarray.open_zarr`
+
 
     Returns
     -------
@@ -621,7 +759,14 @@ def load_diaz_inputs(input_store, seg_vals, params, include_ncc=True, include_cc
     * `surge` is not returned when running the original Diaz 2016 specification, as
       ESL-related losses are estimated via a pre-calculated exponential function
     """
-    inputs = prep_sliiders(input_store, seg_vals, constants=params, seg_var="seg")
+    inputs = prep_sliiders(
+        input_store,
+        seg_vals,
+        constants=params[params.map(type) != dict],
+        seg_var="seg",
+        calc_popdens_with_wetland_area=False,
+        storage_options=storage_options,
+    )
     ncc_inputs = inputs.rcp_pt.str.startswith("rcp0")
     lsl_ncc = inputs.lsl.isel(rcp_pt=ncc_inputs)
     lsl_wcc = inputs.lsl.isel(rcp_pt=~ncc_inputs)
@@ -629,5 +774,13 @@ def load_diaz_inputs(input_store, seg_vals, params, include_ncc=True, include_cc
         [i for i, j in ((lsl_ncc, include_ncc), (lsl_wcc, include_cc)) if j],
         dim="rcp_pt",
     )
+    ix = pd.DataFrame(
+        slr.rcp_pt.str.split("tmp", sep="_p"), columns=["scenario", "quantile"]
+    )
+    ix["quantile"] = ix["quantile"].astype(int) / 100
+    ix["scenario"] = ix.scenario.replace("rcp0", "ncc")
+    ix = ix.set_index(ix.columns.tolist()).index
+    slr = slr.assign_coords(rcp_pt=ix).unstack()
+
     inputs = inputs.drop_dims("rcp_pt")
     return inputs, slr
