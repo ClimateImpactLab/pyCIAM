@@ -1,7 +1,7 @@
 History
 =======
 
-Unreleased
+v1.1.1
 ------
 * Update package dependencies
 
