@@ -1,6 +1,11 @@
 History
 =======
 
+v1.1.2
+------
+* Update zenodo-upload.ipynb to include packages
+* Update readme to emphasize environment.yml
+
 v1.1.1
 ------
 * Update package dependencies

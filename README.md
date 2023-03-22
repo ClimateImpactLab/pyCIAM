@@ -30,6 +30,7 @@ The requisite packages for executing the full Depsky et al. 2023 workflow are id
 
 ```bash
 mamba env create -f /path/to/environment.yml
+mamba activate pyciam
 ```
 
 ## Quickstart

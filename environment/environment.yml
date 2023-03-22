@@ -1,7 +1,6 @@
 name: pyciam
 channels:
   - conda-forge
-
 dependencies:
   - bottleneck=1.3
   - bokeh=2.4.3  # for use of dask dashboard
