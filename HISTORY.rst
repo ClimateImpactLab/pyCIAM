@@ -1,6 +1,11 @@
 History
 =======
 
+v1.1.3 (unreleased)
+-------------------
+* Point `data-acquisition.ipynb` to updated Zenodo deposit that fixes the dtype of `subsets` variable in `diaz2016_inputs_raw.zarr.zip` to be bool rather than int8
+* Variable name bugfix in `data-acquisition.ipynb`
+  
 v1.1.2
 ------
 * Update zenodo-upload.ipynb to include packages
