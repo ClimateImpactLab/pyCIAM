@@ -9,7 +9,7 @@ from pyCIAM import __file__
 
 DIR_SCRATCH = Path("/tmp/ciam-scratch")
 
-SLIIDERS_VERS = "v1.1"
+SLIIDERS_VERS = "v1.2"
 RES_VERS = "v1.1"
 
 # Cloud Storage tools (will work with local storage as well but may need to be specifiec
@@ -221,6 +221,12 @@ def open_dataset(path, **kwargs):
     _path = str(_to_fuse(path))
     _generate_parent_fuse_dirs(_path)
     return xr.open_dataset(_path, **kwargs)
+
+
+def save_dataset(ds, path, **kwargs):
+    _path = str(_to_fuse(path))
+    _generate_parent_fuse_dirs(_path)
+    return ds.to_netcdf(_path, **kwargs)
 
 
 def open_dataarray(path, **kwargs):
