@@ -1,5 +1,5 @@
-"""This private module contains functions related to specific calculations within
-pyCIAM that are called by the ``run`` module."""
+"""This private module contains functions related to specific calculations within pyCIAM
+that are called by the ``run`` module."""
 
 import numpy as np
 import xarray as xr
@@ -12,8 +12,8 @@ def _get_surge_heights_probs(
     min_surge_ht, max_surge_ht, gumbel_params, n_surge_heights=100
 ):
     """Create an array of ``n_surge_heights`` surge heights and associated probabilities
-    to apply in CIAM in order to sample an appropriate range of plausible surge heights.
-    """
+    to apply in CIAM in order to sample an appropriate range of plausible surge
+    heights."""
 
     # get gumbel params
     loc = gumbel_params.sel(params="loc", drop=True)
