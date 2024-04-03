@@ -1,6 +1,10 @@
 History
 =======
 
+unreleased
+----------
+* Update GitHub actions versions
+
 v1.2.0
 ------
 * Point `data-acquisition.ipynb` to updated Zenodo deposit that fixes the dtype of `subsets` variable in `diaz2016_inputs_raw.zarr.zip` to be bool rather than int8
