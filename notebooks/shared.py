@@ -5,6 +5,7 @@ from zipfile import ZipFile
 import geopandas as gpd
 import xarray as xr
 from dask_gateway import GatewayCluster
+
 from pyCIAM import __file__
 
 DIR_SCRATCH = Path("/tmp/ciam-scratch")

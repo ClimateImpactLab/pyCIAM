@@ -16,6 +16,8 @@ import pandas as pd
 import xarray as xr
 from cloudpathlib import AnyPath, CloudPath
 from distributed import Client, wait
+from rhg_compute_tools.xarray import dataarray_from_delayed
+
 from pyCIAM.constants import CASE_DICT, CASES, COSTTYPES, PLIST, RLIST, SOLVCASES
 from pyCIAM.io import (
     check_finished_zarr_workflow,
@@ -38,7 +40,6 @@ from pyCIAM.utils import (
     collapse_econ_inputs_to_seg,
     subset_econ_inputs,
 )
-from rhg_compute_tools.xarray import dataarray_from_delayed
 
 
 def calc_costs(

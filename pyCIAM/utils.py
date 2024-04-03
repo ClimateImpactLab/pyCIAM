@@ -7,8 +7,9 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from cloudpathlib import CloudPath
-from pyCIAM.constants import CASE_DICT
 from sklearn.neighbors import BallTree
+
+from pyCIAM.constants import CASE_DICT
 
 
 def _s2d(ds):
