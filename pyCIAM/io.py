@@ -2,9 +2,10 @@
 outputs used in running pyCIAM.
 
 Functions
-    prep_sliiders
-    load_ciam_inputs
-    load_diaz_inputs
+---------
+* prep_sliiders
+* load_ciam_inputs
+* load_diaz_inputs
 """
 
 import tempfile
@@ -305,11 +306,11 @@ def _load_lslr_for_ciam(
 
 def create_template_dataarray(dims, coords, chunks, dtype="float32", name=None):
     """A utility function helpful for creatting an empty, dask-backed
-    :py:class:`xarray.DataArray` with specific dimensions, coordinates, dtype, name,
-    and chunk structure. This is useful for "probabilistic" mode of pyCIAM, in which
-    you will run the model on a large ensemble of SLR trajectory realizations. In this
-    case, we save an empty Zarr store and then parallelize the model runs across
-    regions, with each processor writing to a region within the template store.
+    :py:class:`xarray.DataArray` with specific dimensions, coordinates, dtype, name, and
+    chunk structure. This is useful for "probabilistic" mode of pyCIAM, in which you
+    will run the model on a large ensemble of SLR trajectory realizations. In this case,
+    we save an empty Zarr store and then parallelize the model runs across regions, with
+    each processor writing to a region within the template store.
 
     Parameters
     ----------
@@ -344,10 +345,10 @@ def create_template_dataarray(dims, coords, chunks, dtype="float32", name=None):
 def create_template_dataset(var_dims, coords, chunks, dtypes):
     """A utility function helpful for creatting an empty, dask-backed
     :py:class:`xarray.Dataset` with specific variables, dimensions, coordinates, dtypes,
-    and chunk structure. This is useful for "probabilistic" mode of pyCIAM, in which
-    you will run the model on a large ensemble of SLR trajectory realizations. In this
-    case, we save an empty Zarr store and then parallelize the model runs across
-    regions, with each processor writing to a region within the template store.
+    and chunk structure. This is useful for "probabilistic" mode of pyCIAM, in which you
+    will run the model on a large ensemble of SLR trajectory realizations. In this case,
+    we save an empty Zarr store and then parallelize the model runs across regions, with
+    each processor writing to a region within the template store.
 
     Parameters
     ----------

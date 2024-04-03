@@ -1,4 +1,4 @@
-"""This private module contains miscellaneous functions to support pyCIAM"""
+"""This private module contains miscellaneous functions to support pyCIAM."""
 
 import shutil
 from pathlib import Path
@@ -281,13 +281,18 @@ def collapse_econ_inputs_to_seg(
 def subset_econ_inputs(ds, seg_var, seg_var_subset):
     if seg_var_subset is None:
         return ds
-    if seg_var == "seg":
-        return ds.sel(seg=ds.seg.str.contains(seg_var_subset))
 
-    necessary_segs = np.unique(
-        ds.seg.sel({seg_var: ds[seg_var].str.contains(seg_var_subset)})
-    )
-    return ds.sel({seg_var: ds.seg.isin(necessary_segs)})
+    if isinstance(seg_var_subset, str):
+        if seg_var == "seg":
+            subsetter = ds.seg.str.contains(seg_var_subset)
+        else:
+            subsetter = ds.seg.isin(
+                np.unique(
+                    ds.seg.sel({seg_var: ds[seg_var].str.contains(seg_var_subset)})
+                )
+            )
+
+    return ds.sel({seg_var: subsetter})
 
 
 def copy(path_src, path_trg):
