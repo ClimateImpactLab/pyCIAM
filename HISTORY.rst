@@ -1,9 +1,11 @@
 History
 =======
 
-unreleased
-----------
+v1.2.1
+------
 * Update GitHub actions versions
+* Update data acquisition notebook, using helper functions to download input data from
+  zenodo
 
 v1.2.0
 ------
