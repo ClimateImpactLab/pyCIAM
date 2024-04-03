@@ -2,9 +2,10 @@
 options are calculated.
 
 Functions
-    calc_costs
-    select_optimal_case
-    execute_pyciam
+---------
+* calc_costs
+* select_optimal_case
+* execute_pyciam
 """
 
 from collections import OrderedDict
@@ -15,8 +16,6 @@ import pandas as pd
 import xarray as xr
 from cloudpathlib import AnyPath, CloudPath
 from distributed import Client, wait
-from rhg_compute_tools.xarray import dataarray_from_delayed
-
 from pyCIAM.constants import CASE_DICT, CASES, COSTTYPES, PLIST, RLIST, SOLVCASES
 from pyCIAM.io import (
     check_finished_zarr_workflow,
@@ -39,6 +38,7 @@ from pyCIAM.utils import (
     collapse_econ_inputs_to_seg,
     subset_econ_inputs,
 )
+from rhg_compute_tools.xarray import dataarray_from_delayed
 
 
 def calc_costs(
@@ -83,9 +83,9 @@ def calc_costs(
     elev_chunksize : int, default 1
         Number of elevation slices to process simultaneously. Higher numbers improve
         efficiency through vectorization but result in a larger memory footprint.
-    ddf_i, dmf_i : func, default :py:func:`.damage_funcs.ddf_i`, :py:func:`.damage_funcs.dmf_i`
-        Damage functions relating physical capital loss and monetized mortality arising
-        from a certain depth of inundation.
+    ddf_i, dmf_i : func, default :py:func:`.damage_funcs.ddf_i`,
+        :py:func:`.damage_funcs.dmf_i`. Damage functions relating physical capital loss
+        and monetized mortality arising from a certain depth of inundation.
     diaz_protect_height : bool, default False
         If True, reduce the 1-in-10-year extreme sea level by 50% as in Diaz 2016. This
         hack should not be necessary when using the ESL heights from CoDEC (as in
@@ -280,9 +280,9 @@ def calc_costs(
         surge_noadapt["stormCapital"] = surge_noadapt.stormCapital * inputs.K.sum(
             "elev"
         )
-        surge_noadapt[
-            "stormPopulation"
-        ] = surge_noadapt.stormPopulation * inputs.pop.sum("elev")
+        surge_noadapt["stormPopulation"] = (
+            surge_noadapt.stormPopulation * inputs.pop.sum("elev")
+        )
     else:
         if surge_lookup is None:
             rh_years = RH_heights.sel(at=at).drop("at")
@@ -402,9 +402,9 @@ def calc_costs(
             surge_noadapt["stormCapital"] = surge_noadapt.stormCapital * inputs.K.sum(
                 "elev"
             )
-            surge_noadapt[
-                "stormPopulation"
-            ] = surge_noadapt.stormPopulation * inputs.pop.sum("elev")
+            surge_noadapt["stormPopulation"] = (
+                surge_noadapt.stormPopulation * inputs.pop.sum("elev")
+            )
 
     surge = surge.stack(tmp=["adapttype", "return_period"])
     surge = (
@@ -880,6 +880,7 @@ def execute_pyciam(
     surge_input_paths=None,
     output_path=None,
     tmp_output_path=AnyPath("pyciam_tmp_results.zarr"),
+    remove_tmpfile=True,
     overwrite=False,
     mc_dim="quantile",
     seg_var="seg_adm",
@@ -895,7 +896,7 @@ def execute_pyciam(
     diaz_inputs=False,
     diaz_config=False,
     dask_client_func=Client,
-    storage_options={},
+    storage_options=None,
     **model_kwargs
 ):
     """Execute the full pyCIAM model. The following inputs are assumed:
@@ -957,6 +958,10 @@ def execute_pyciam(
     tmp_output_path : Path-like, default Path("pyciam_tmp_results.zarr")
         Path to temporary output zarr store that is written to and read from within this
         function. Ignored if `output_path` is not None.
+    remove_tmpfile : bool, default True
+        If True, remove the intermediate zarr store created before collapsing to
+        `adm_var` and rechunking. Setting to False can be useful for debugging if you
+        want to examine seg-adm level results.
     ovewrwrite : bool, default False
         If True, overwrite all intermediate output files
     mc_dim : str, default "quantile"
@@ -1052,6 +1057,9 @@ def execute_pyciam(
         surge_input_paths = {k: AnyPath(v) for k, v in surge_input_paths.items()}
     slr_input_paths = [AnyPath(f) if f is not None else None for f in slr_input_paths]
 
+    if seg_var == "seg":
+        adm_var = "seg"
+
     # read parameters
     params = pd.read_json(params_path)["values"]
 
@@ -1095,7 +1103,6 @@ def execute_pyciam(
     if seg_var == "seg":
         econ_input_path_seg = econ_input_path
     else:
-        assert tmp_output_path is not None
         if overwrite or not econ_input_path_seg.is_dir():
             collapse_econ_inputs_to_seg(
                 econ_input_path,
@@ -1382,13 +1389,15 @@ def execute_pyciam(
         .chunk({"year": 10})
         .persist()
     )
-    out["costs"] = (
-        out.costs.groupby(ciam_in[adm_var]).sum().chunk({adm_var: this_chunksize})
-    ).persist()
-    out["optimal_case"] = (
-        out.optimal_case.load().groupby(ciam_in.seg).first(skipna=False).chunk()
-    ).persist()
-    out = out.drop(seg_var).unify_chunks()
+    if adm_var != seg_var:
+        out["costs"] = (
+            out.costs.groupby(ciam_in[adm_var]).sum().chunk({adm_var: this_chunksize})
+        ).persist()
+        out["optimal_case"] = (
+            out.optimal_case.load().groupby(ciam_in.seg).first(skipna=False).chunk()
+        ).persist()
+        out = out.drop(seg_var)
+    out = out.unify_chunks()
 
     for v in out.data_vars:
         out[v].encoding.clear()
@@ -1411,10 +1420,11 @@ def execute_pyciam(
     )
     client.cluster.close()
     client.close()
-    if isinstance(tmp_output_path, CloudPath):
-        tmp_output_path.rmtree()
-    else:
-        rmtree(tmp_output_path)
+    if remove_tmpfile:
+        if isinstance(tmp_output_path, CloudPath):
+            tmp_output_path.rmtree()
+        else:
+            rmtree(tmp_output_path)
 
 
 def get_refA(
@@ -1595,7 +1605,7 @@ def optimize_case(
     ) as ds:
         all_segs = ds.seg.load()
 
-    this_seg_adms = all_segs.seg_adm.isel({seg_var: all_segs.seg == seg}).values
+    this_seg_adms = all_segs[seg_var].isel({seg_var: all_segs.seg == seg}).values
 
     save_to_zarr_region(
         select_optimal_case(

@@ -17,7 +17,6 @@ Public Functions:
     create_surge_lookup
 """
 
-
 import dask.array as da
 import numpy as np
 import pandas as pd
@@ -63,12 +62,15 @@ def _get_lslr_rhdiff_range(
     storage_options={},
 ):
     """Get the range of lslr and rhdiff that we need to model to cover the full range
-    across scenario/mcs. The minimum LSLR value we'll need to model for the purposes of
+    across scenario/mcs.
+
+    The minimum LSLR value we'll need to model for the purposes of
     assessing storm damage is the minimum across sites of: the site-level maximum of "0
     minus the s10000 surge height" and "the minimum projected LSLR for all of the
     scenario/mcs we use in our binned LSL dataset". The maximum LSLR value is the
     maximum experienced at any site in any year for all of the sceanrio/mcs we use in
-    the binned LSL dataset."""
+    the binned LSL dataset.
+    """
 
     if isinstance(slr_0_years, int):
         slr_0_years = [slr_0_years] * len(slr_stores)

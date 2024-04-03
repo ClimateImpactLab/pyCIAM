@@ -2,8 +2,8 @@
 relate storm surge depth to mortality and physical capital loss. As of April 7, 2022,
 the only functions available are those included in Diaz 2016. These define the
 "resilience-unadjusted" fractional damages. That is, for a region with resiliendce
-factor (:math:`\rho`) of 1, what fraction of the exposed population and/or physical capital
-will be lost conditional on a storm surge depth.
+factor (:math:`\rho`) of 1, what fraction of the exposed population and/or physical
+capital will be lost conditional on a storm surge depth.
 
 At the moment, functions must have an analytical integral and are actually defined by
 their integral, as can be seen with the suffix ``_i``.
@@ -51,7 +51,8 @@ def diaz_ddf_i(depth_st, depth_end):
 
 def diaz_dmf_i(depth_st, depth_end, floodmortality=0.01):
     """Integral of mortality damage function as used in Diaz 2016, assuming unit
-    resilience (:math:`\rho`). It is just a constant fraction conditional on a unit of exposure being inundated. Note that kwargs are not optional and will raise an error
+    resilience (:math:`\rho`). It is just a constant fraction conditional on a unit of
+    exposure being inundated. Note that kwargs are not optional and will raise an error
     if not specified when called.
 
     Parameters
