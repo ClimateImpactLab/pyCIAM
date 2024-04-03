@@ -8,12 +8,22 @@ Functions
 * load_diaz_inputs
 """
 
+import tempfile
+from collections.abc import Iterable
+from io import BytesIO
+from pathlib import Path
+from zipfile import ZipFile
+
 import dask.array as da
 import numpy as np
 import pandas as pd
 import pint_xarray  # noqa: F401
+import requests
 import xarray as xr
+from fsspec import FSTimeoutError
+from fsspec.implementations.zip import ZipFileSystem
 
+from pyCIAM.utils import copy
 from pyCIAM.utils import spherical_nearest_neighbor as snn
 
 from .utils import _s2d
@@ -783,3 +793,70 @@ def load_diaz_inputs(
 
     inputs = inputs.drop_dims("rcp_pt")
     return inputs, slr
+
+
+def get_zenodo_file_list(doi, params={}):
+    return requests.get(f"https://zenodo.org/api/records/{doi}", params=params).json()[
+        "files"
+    ]
+
+
+def get_download_link(files, prefix):
+    links = [
+        i["links"]
+        for i in files
+        if i.get("filename", "").startswith(prefix)
+        or i.get("key", "").startswith(prefix)
+    ]
+    assert len(links) == 1
+    links = links[0]
+    return links.get("download", links["self"])
+
+
+def _download_and_extract_full_zip(lpath, url, params={}):
+    if lpath.exists():
+        return None
+    lpath.parent.mkdir(exist_ok=True, parents=True)
+
+    content = BytesIO(requests.get(url, params=params).content)
+    if isinstance(lpath, Path):
+        with ZipFile(content, "r") as zip_ref:
+            zip_ref.extractall(lpath)
+    else:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with ZipFile(content, "r") as zip_ref:
+                zip_ref.extractall(tmpdir)
+            copy(Path(tmpdir), lpath)
+
+
+def download_and_extract_partial_zip(lpath, url, zip_glob, n_retries=5):
+    lpath.mkdir(exist_ok=True, parents=True)
+    z = ZipFileSystem(url)
+    if isinstance(zip_glob, (list, set, tuple, np.ndarray)):
+        files_remote = zip_glob
+    else:
+        files_remote = [p for p in z.glob(zip_glob) if not p.endswith("/")]
+    files_local = [lpath / Path(f).name for f in files_remote]
+    for fr, fl in list(zip(files_remote, files_local)):
+        if not fl.is_file():
+            retries = 0
+            while retries < n_retries:
+                print(f"...Downloading {fl.name} (attempt {retries+1}/{n_retries})")
+                try:
+                    data = z.cat_file(fr)
+                    break
+                except FSTimeoutError:
+                    if retries < (n_retries - 1):
+                        retries += 1
+                    else:
+                        raise
+            print(f"...Writing {fl.name}")
+            fl.write_bytes(data)
+
+
+def download_and_extract_from_zenodo(lpath, files, prefix, zip_glob=None):
+    dl = get_download_link(files, prefix)
+    if zip_glob is None:
+        return _download_and_extract_full_zip(lpath, dl)
+    else:
+        return download_and_extract_partial_zip(lpath, dl, zip_glob)
