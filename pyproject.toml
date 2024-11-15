@@ -10,3 +10,41 @@ build-backend = "setuptools.build_meta"
 profile = "black"
 
 [tool.setuptools_scm]
+
+[project]
+name = "python-CIAM"
+description = "An efficient Python implementation of the Coastal Impacts and Adaptation Model (CIAM)"
+readme = "README.md"
+authors = [{ name = "Ian Bolliger", email = "ian@reask.earth"}, { name = "Nicholas Depsky", email = "nicholas.depsky@undp.org" }]
+maintainers = [{ name = "Ian Bolliger", email = "ian@reask.earth"}]
+dependencies = [
+    "cloudpathlib",
+    "dask",
+    "distributed",
+    "gitpython",
+    "numpy",
+    "rhg_compute_tools",
+    "pandas",
+    "parameterize_jobs",
+    "pint-xarray",
+    "scipy",
+    "scikit-learn",
+    "xarray",
+    "zarr"
+]
+requires-python = ">=3.6"
+dynamic = ["version"]
+
+[project.urls]
+"Homepage" = "https://github.com/ClimateImpactLab/pyCIAM"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
