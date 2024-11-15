@@ -19,18 +19,12 @@ authors = [{ name = "Ian Bolliger", email = "ian@reask.earth"}, { name = "Nichol
 maintainers = [{ name = "Ian Bolliger", email = "ian@reask.earth"}]
 dependencies = [
     "cloudpathlib",
-    "dask",
-    "distributed",
     "gitpython",
-    "numpy",
     "rhg_compute_tools",
-    "pandas",
     "parameterize_jobs",
     "pint-xarray",
-    "scipy",
     "scikit-learn",
-    "xarray",
-    "zarr"
+    "xarray[complete]",
 ]
 requires-python = ">=3.6"
 dynamic = ["version"]
