@@ -34,14 +34,14 @@ dependencies = [
 ]
 requires-python = ">=3.6"
 dynamic = ["version"]
-
-[project.urls]
-"Homepage" = "https://github.com/ClimateImpactLab/pyCIAM"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent"
 ]
+
+[project.urls]
+"Homepage" = "https://github.com/ClimateImpactLab/pyCIAM"
 
 [tool.setuptools]
 include-package-data = true
