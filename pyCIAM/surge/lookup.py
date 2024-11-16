@@ -1,4 +1,6 @@
-"""This module contains functions related to creating a storm surge lookup table used
+"""Functions to create a storm surge lookup table.
+
+This module contains functions related to creating a storm surge lookup table used
 when running pyCIAM in "probabilistic" mode (i.e. running on many thousands of Monte
 Carlo samples of sea level rise trajectories). In this mode, calculating storm surge
 damages for each elevation slice, each year, each segment, each socioeconomic
@@ -61,8 +63,7 @@ def _get_lslr_rhdiff_range(
     mc_dim="mc_sample_id",
     storage_options={},
 ):
-    """Get the range of lslr and rhdiff that we need to model to cover the full range
-    across scenario/mcs.
+    """Get range of lslr and rhdiff that we need to model to cover the full range.
 
     The minimum LSLR value we'll need to model for the purposes of
     assessing storm damage is the minimum across sites of: the site-level maximum of "0
@@ -71,7 +72,6 @@ def _get_lslr_rhdiff_range(
     maximum experienced at any site in any year for all of the sceanrio/mcs we use in
     the binned LSL dataset.
     """
-
     if isinstance(slr_0_years, int):
         slr_0_years = [slr_0_years] * len(slr_stores)
     assert len(slr_0_years) == len(slr_stores)
@@ -153,14 +153,12 @@ def _get_lslr_rhdiff_range(
         {
             "lslr_by_seg": (
                 ("lslr", seg_var),
-                np.linspace(min_lslr, max_lslr, n_interp_pts_lslr),
+                np.linspace(min_lslr.values, max_lslr.values, n_interp_pts_lslr),
             ),
             "rh_diff_by_seg": (
                 ("rh_diff", seg_var),
-                np.linspace(0, rh_diff_max, n_interp_pts_rhdiff),
+                np.linspace(0, rh_diff_max.values, n_interp_pts_rhdiff),
             ),
-        },
-        coords={
             "lslr": np.arange(n_interp_pts_lslr),
             "rh_diff": np.arange(n_interp_pts_lslr),
             seg_var: pc_in[seg_var].values,
@@ -245,7 +243,7 @@ def _save_storm_dam(
     slr_0_years=2005,
     storage_options={},
 ):
-    """Function to map over each chunk to run through damage calcs."""
+    """Map over each chunk to run through damage calcs."""
     diff_ranges = _get_lslr_rhdiff_range(
         sliiders_store,
         slr_stores,
@@ -381,7 +379,9 @@ def create_surge_lookup(
     client_kwargs={},
     storage_options={},
 ):
-    """Create a storm surge lookup table which is used to define a linear spline
+    """Create storm surge lookup table.
+
+    Create a storm surge lookup table which is used to define a linear spline
     function for each region modeled in pyCIAM. This output is not strictly necessary to
     run pyCIAM but substantially reduces computational expense when running pyCIAM on a
     large probabilistic ensemble of SLR trajectories.
@@ -460,7 +460,6 @@ def create_surge_lookup(
     -------
     Returns None, but saves storm surge lookup table to `surge_lookup_store`.
     """
-
     to_save = _create_surge_lookup_skeleton_store(
         sliiders_store,
         n_interp_pts_lslr,
