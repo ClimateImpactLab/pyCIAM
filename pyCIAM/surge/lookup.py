@@ -149,24 +149,15 @@ def _get_lslr_rhdiff_range(
     # occasionally, the gumbel fit was negative, so we set the 1-year return to 0
     assert (rh_diff_max > 0).all()
 
-    seg_vals = pc_in[seg_var].values
     return xr.Dataset(
         {
             "lslr_by_seg": (
                 ("lslr", seg_var),
-                np.repeat(
-                    np.linspace(min_lslr, max_lslr, n_interp_pts_lslr)[:, np.newaxis],
-                    len(seg_vals),
-                    axis=1,
-                ),
+                np.linspace(min_lslr.values, max_lslr.values, n_interp_pts_lslr),
             ),
             "rh_diff_by_seg": (
                 ("rh_diff", seg_var),
-                np.repeat(
-                    np.linspace(0, rh_diff_max, n_interp_pts_rhdiff)[:, np.newaxis],
-                    len(seg_vals),
-                    axis=1,
-                ),
+                np.linspace(0, rh_diff_max.values, n_interp_pts_rhdiff),
             ),
             "lslr": np.arange(n_interp_pts_lslr),
             "rh_diff": np.arange(n_interp_pts_lslr),
