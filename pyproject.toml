@@ -24,7 +24,8 @@ dependencies = [
     "parameterize_jobs",
     "pint-xarray",
     "scikit-learn",
-    "xarray[complete]",
+    "xarray[accel,parallel]",
+    "zarr"
 ]
 requires-python = ">=3.6"
 dynamic = ["version"]
