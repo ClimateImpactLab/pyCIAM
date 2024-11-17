@@ -504,7 +504,8 @@ def calc_costs(
     # --------- ELEVATION DISTRIBUTION-DEPENENT COSTS ----------
     def calc_elev_bin_weights(slr, lb_elevs, bin_width):
         """Calculates the fraction of a cell inundated/abandoned given a defined
-        slr/retreat height."""
+        slr/retreat height.
+        """
         return _pos(np.minimum(slr - lb_elevs, bin_width)) / bin_width
 
     # loop over each elevation band to sum up elevation-distribution-dependent costs
@@ -832,7 +833,6 @@ def select_optimal_case(
         ``optimalfixed``, which represents the optimal adaptation choice for this region
         for each socioeconomic and SLR trajectory.
     """
-
     opt_case = (
         xr.open_zarr(
             str(all_case_cost_path), chunks=None, storage_options=storage_options
@@ -898,7 +898,7 @@ def execute_pyciam(
     diaz_config=False,
     dask_client_func=Client,
     storage_options=None,
-    **model_kwargs
+    **model_kwargs,
 ):
     """Execute the full pyCIAM model. The following inputs are assumed:
 
@@ -1032,7 +1032,6 @@ def execute_pyciam(
     **model_kwargs
         Passed directly to :py:func:`pyCIAM.calc_costs`
     """
-
     # convert filepaths to appropriate path representation
     (
         params_path,
@@ -1190,7 +1189,7 @@ def execute_pyciam(
                 "case": CASES,
                 "costtype": COSTTYPES,
                 seg_var: ciam_in[seg_var].values,
-                "scenario": slr.scenario,
+                "scenario": slr.scenario.astype("unicode"),
                 "quantile": quantiles,
                 "year": np.arange(params.model_start, ciam_in.year.max().item() + 1),
                 **{
@@ -1251,7 +1250,7 @@ def execute_pyciam(
                     quantiles=quantiles,
                     diaz_inputs=diaz_inputs,
                     eps=eps,
-                    **model_kwargs
+                    **model_kwargs,
                 ),
                 dim="seg",
             )
@@ -1316,7 +1315,7 @@ def execute_pyciam(
             storage_options=storage_options,
             diaz_inputs=diaz_inputs,
             check=check,
-            **model_kwargs
+            **model_kwargs,
         )
     )
 
@@ -1365,7 +1364,7 @@ def execute_pyciam(
             seg_var=seg_var,
             eps=eps,
             check=check,
-            storage_options=storage_options
+            storage_options=storage_options,
         ),
         axis=1,
     )
@@ -1439,7 +1438,7 @@ def get_refA(
     quantiles=[0.5],
     eps=1,
     diaz_inputs=False,
-    **model_kwargs
+    **model_kwargs,
 ):
     if diaz_inputs:
         inputs, slr = load_diaz_inputs(
@@ -1463,7 +1462,7 @@ def get_refA(
             include_ncc=True,
             storage_options=storage_options,
             quantiles=quantiles,
-            **params.refA_scenario_selectors
+            **params.refA_scenario_selectors,
         )
         slr = slr.unstack("scen_mc")
     slr = slr.squeeze(drop=True)
@@ -1514,7 +1513,7 @@ def calc_all_cases(
     storage_options={},
     check=True,
     diaz_inputs=False,
-    **model_kwargs
+    **model_kwargs,
 ):
     if check_finished_zarr_workflow(
         finalstore=output_path if check else None,
@@ -1565,7 +1564,7 @@ def calc_all_cases(
         surge_lookup=surge,
         elev_chunksize=None,
         min_R_noadapt=refA,
-        **model_kwargs
+        **model_kwargs,
     ).to_dataset(name="costs")
     if seg_var != "seg":
         out = out.rename(seg=seg_var)
@@ -1589,7 +1588,7 @@ def optimize_case(
     seg_var="seg_adm",
     check=True,
     eps=1,
-    storage_options={}
+    storage_options={},
 ):
     # use last fpath to check if this task has already been run
     if check and check_finished_zarr_workflow(
