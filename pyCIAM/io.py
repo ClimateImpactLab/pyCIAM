@@ -36,6 +36,7 @@ def prep_sliiders(
     seg_var="seg_adm",
     selectors={},
     calc_popdens_with_wetland_area=True,
+    expand_exposure=True,
     storage_options={},
 ):
     """Import the SLIIDERS dataset (or a different dataset formatted analogously),
@@ -66,6 +67,11 @@ def prep_sliiders(
         If True, assume that population can also exist in Wetland area. This is
         observed empirically, but presumably at a lower density. Diaz 2016 assumes False
         but Depsky 2023 assumes True.
+    expand_exposure : bool, default True
+        If the input contains population ("pop") and capital ("K") for a fixed year,
+        plus a country-level scaling factor for each year, setting this to True
+        (default) expands this to a panel dataset of each variable. This substantially
+        increases size of the dataset, so can be set to False if not Needed
     storage_options : dict, optional
         Passed to :py:function:`xarray.open_zarr`
 
@@ -99,14 +105,14 @@ def prep_sliiders(
     ).sel(selectors, drop=True)
 
     inputs = inputs_all.sel({seg_var: seg_vals})
-    inputs = _s2d(inputs).assign(constants.to_dict())
+    inputs = _s2d(inputs).assign(constants)
 
     # assign country level vars to each segment
     for v in inputs.data_vars:
         if "country" in inputs[v].dims:
             inputs[v] = inputs[v].sel(country=inputs.seg_country).drop("country")
 
-    if "vsl" not in inputs.data_vars:
+    if "vsl" not in inputs.data_vars and "vsl_ypc_mult" in inputs.data_vars:
         if "ref_income" in inputs:
             ref_income = inputs.ref_income
         else:
@@ -118,7 +124,7 @@ def prep_sliiders(
             * (inputs.ypcc / ref_income) ** inputs.vsl_inc_elast
         )
 
-    if "pop" not in inputs.data_vars:
+    if expand_exposure and "pop" not in inputs.data_vars:
         exp_year = [
             v for v in inputs.data_vars if v.startswith("pop_") and "scale" not in v
         ]
@@ -127,11 +133,11 @@ def prep_sliiders(
         pop_var = "pop_" + exp_year
         inputs["pop"] = inputs[pop_var] * inputs.pop_scale
         inputs = inputs.drop(pop_var)
-    if "K" not in inputs.data_vars:
+    if expand_exposure and "K" not in inputs.data_vars:
         K_var = "K_" + exp_year
         inputs["K"] = inputs[K_var] * inputs.K_scale
         inputs = inputs.drop(K_var)
-    if "dfact" not in inputs.data_vars:
+    if "dfact" not in inputs.data_vars and "npv_start" in inputs.data_vars:
         inputs["dfact"] = (1 / (1 + inputs.dr)) ** (inputs.year - inputs.npv_start)
 
     if "landrent" or "ypc" not in inputs.data_vars:
@@ -139,7 +145,11 @@ def prep_sliiders(
         if calc_popdens_with_wetland_area:
             area = area + inputs.wetland
         popdens = (inputs.pop / area).fillna(0)
-        if "landrent" not in inputs.data_vars:
+        if (
+            "landrent" not in inputs.data_vars
+            and "min_coastland_scale" in inputs.data_vars
+            and "dr" in inputs.data_vars
+        ):
             coastland_scale = np.minimum(
                 1,
                 np.maximum(
@@ -149,26 +159,32 @@ def prep_sliiders(
             )
             inputs["landrent"] = inputs.interior * coastland_scale * inputs.dr
 
-        if "ypc" not in inputs.data_vars:
+        if (
+            "ypc" not in inputs.data_vars
+            and "min_pyc_scale" in inputs.data_vars
+            and "ypc_scale_denom" in inputs.data_vars
+            and "ypc_scale_elast" in inputs.data_vars
+        ):
             ypc_scale = np.maximum(
                 inputs.min_ypc_scale,
                 (popdens / inputs.ypc_scale_denom) ** inputs.ypc_scale_elast,
             )
             inputs["ypc"] = ypc_scale * inputs.ypcc
 
+    to_drop = [
+        "interior",
+        "dr",
+        "min_coastland_scale",
+        "min_ypc_scale",
+        "ypc_scale_denom",
+        "ypc_scale_elast",
+        "vsl_ypc_mult",
+        "vsl_inc_elast",
+    ]
+    if expand_exposure:
+        to_drop += ["pop_scale", "K_scale"]
     return inputs.drop(
-        [
-            "pop_scale",
-            "K_scale",
-            "interior",
-            "dr",
-            "min_coastland_scale",
-            "min_ypc_scale",
-            "ypc_scale_denom",
-            "ypc_scale_elast",
-            "vsl_ypc_mult",
-            "vsl_inc_elast",
-        ],
+        to_drop,
         errors="ignore",
     )
 
@@ -555,7 +571,8 @@ def get_nearest_slrs(slr_ds, lonlats, x1="seg_lon", y1="seg_lat"):
 
 def add_nearest_slrs(sliiders_ds, slr_ds):
     """Add a variable to ``sliiders_ds`` called `SLR_site_id` that contains the nearest
-    SLR site to each segment."""
+    SLR site to each segment.
+    """
     sliiders_lonlat = sliiders_ds[["seg_lon", "seg_lat"]].to_dataframe()
     return sliiders_ds.assign(
         SLR_site_id=get_nearest_slrs(slr_ds, sliiders_lonlat).to_xarray()
@@ -672,7 +689,7 @@ def load_ciam_inputs(
         seg_vals,
         # dropping the "refA_scenario_selectors" b/c this doesn't need to be added to
         # the input dataset object
-        constants=params[params.map(type) != dict],
+        constants=params[params.map(type) != dict].to_dict(),
         seg_var=seg_var,
         selectors=selectors,
         storage_options=storage_options,
@@ -771,7 +788,7 @@ def load_diaz_inputs(
     inputs = prep_sliiders(
         input_store,
         seg_vals,
-        constants=params[params.map(type) != dict],
+        constants=params[params.map(type) != dict].to_dict(),
         seg_var="seg",
         calc_popdens_with_wetland_area=False,
         storage_options=storage_options,
