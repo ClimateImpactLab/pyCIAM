@@ -39,9 +39,10 @@ def prep_sliiders(
     expand_exposure=True,
     storage_options={},
 ):
-    """Import the SLIIDERS dataset (or a different dataset formatted analogously),
-    format, and calculate derived variables so that it can be used by the functions that
-    implement pyCIAM.
+    """Import the SLIIDERS dataset (or a different dataset formatted analogously).
+
+    Input, format, and calculate derived variables so that it can be used by the
+    functions that implement pyCIAM.
 
     Parameters
     ----------
@@ -140,7 +141,7 @@ def prep_sliiders(
     if "dfact" not in inputs.data_vars and "npv_start" in inputs.data_vars:
         inputs["dfact"] = (1 / (1 + inputs.dr)) ** (inputs.year - inputs.npv_start)
 
-    if "landrent" or "ypc" not in inputs.data_vars:
+    if "landrent" not in inputs.data_vars or "ypc" not in inputs.data_vars:
         area = inputs.landarea
         if calc_popdens_with_wetland_area:
             area = area + inputs.wetland
@@ -161,7 +162,7 @@ def prep_sliiders(
 
         if (
             "ypc" not in inputs.data_vars
-            and "min_pyc_scale" in inputs.data_vars
+            and "min_ypc_scale" in inputs.data_vars
             and "ypc_scale_denom" in inputs.data_vars
             and "ypc_scale_elast" in inputs.data_vars
         ):
