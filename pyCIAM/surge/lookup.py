@@ -130,8 +130,8 @@ def _get_lslr_rhdiff_range(
         mins.append(min_lslr)
         maxs.append(max_lslr)
 
-    min_lslr = xr.concat(mins, dim="tmp").min("tmp")
-    max_lslr = xr.concat(maxs, dim="tmp").max("tmp")
+    min_lslr = xr.concat(mins, dim="tmp").min("tmp") - 2 * np.finfo("float32").eps
+    max_lslr = xr.concat(maxs, dim="tmp").max("tmp") + 2 * np.finfo("float32").eps
 
     at = _get_planning_period_map(lslr.year, at_start)
 
