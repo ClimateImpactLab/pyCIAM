@@ -341,21 +341,27 @@ def calc_costs(
                 )
                 if this_surge_lookup.sum() == 0:
                     continue
-                surge_noadapt.append(
+                this_surge_noadapt = (
                     this_surge_lookup.sel(adapttype="retreat", drop=True)
                     .interp(
                         lslr=lslr.sel(seg=seg),
                         rh_diff=rh_diff_noadapt.sel(seg=seg),
                         assume_sorted=True,
-                        kwargs={"fill_value": 0},
                     )
                     .reset_coords(drop=True)
                     .expand_dims(seg=[seg])
                 )
 
+                # ensure nans are only at the beginning
+                assert this_surge_noadapt.isnull().sum(
+                    "lslr"
+                ) == this_surge_noadapt.notnull().argmax("lslr")
+
+                surge_noadapt.append(this_surge_noadapt.fillna(0))
+
                 surge_adapt = []
                 for adapttype in this_surge_lookup.adapttype.values:
-                    surge_adapt.append(
+                    this_surge_adapt = (
                         this_surge_lookup.sel(adapttype=adapttype)
                         .interp(
                             lslr=lslr.sel(seg=seg),
@@ -363,10 +369,16 @@ def calc_costs(
                                 adapttype=adapttype, seg=seg, drop=True
                             ),
                             assume_sorted=True,
-                            kwargs={"fill_value": 0},
                         )
                         .reset_coords(drop=True)
                     )
+
+                    # ensure nans are only at the beginning
+                    assert this_surge_adapt.isnull().sum(
+                        "lslr"
+                    ) == this_surge_adapt.notnull().argmax("lslr")
+
+                    surge_adapt.append(this_surge_adapt.fillna(0))
                 surge.append(
                     xr.concat(surge_adapt, dim=this_surge_lookup.adapttype).expand_dims(
                         seg=[seg]
