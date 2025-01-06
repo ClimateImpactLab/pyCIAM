@@ -339,6 +339,7 @@ def calc_costs(
                     .reset_coords(drop=True)
                     .frac_losses.rename(lslr_by_seg="lslr", rh_diff_by_seg="rh_diff")
                 )
+                lslr_too_low = lslr.sel(seg=seg) < this_surge_lookup.lslr.min()
                 if this_surge_lookup.sum() == 0:
                     continue
                 this_surge_noadapt = (
@@ -353,9 +354,7 @@ def calc_costs(
                 )
 
                 # ensure nans are only at the beginning
-                assert this_surge_noadapt.isnull().sum(
-                    "lslr"
-                ) == this_surge_noadapt.notnull().argmax("lslr")
+                assert (this_surge_noadapt.notnull() | lslr_too_low).all()
 
                 surge_noadapt.append(this_surge_noadapt.fillna(0))
 
@@ -374,9 +373,7 @@ def calc_costs(
                     )
 
                     # ensure nans are only at the beginning
-                    assert this_surge_adapt.isnull().sum(
-                        "lslr"
-                    ) == this_surge_adapt.notnull().argmax("lslr")
+                    assert (this_surge_adapt.notnull() | lslr_too_low).all()
 
                     surge_adapt.append(this_surge_adapt.fillna(0))
                 surge.append(
@@ -1078,7 +1075,6 @@ def execute_pyciam(
     # determine whether to check for finished jobs
     if output_path is None:
         check = False
-        tmp_output_path = None
     else:
         check = True
 
