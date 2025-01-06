@@ -310,14 +310,16 @@ def _load_lslr_for_ciam(
             .set_index(scen_mc=ix_names)
         )
 
-    # interpolate to yearly
+    # add on base year where slr is 0
     slr_out = slr_out.reindex(
         year=np.concatenate(([slr_0_year], slr.year.values)),
         fill_value=0,
     )
 
+    # interpolate to desired years
     if interp_years is not None:
         slr_out = slr_out.interp(year=interp_years)
+
     return slr_out
 
 
