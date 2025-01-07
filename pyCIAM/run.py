@@ -341,14 +341,14 @@ def calc_costs(
                     "(initial adaptation) table if it was generated for a different "
                     "set of SLR scenarios or years."
                 )
+                # lslr is allowed to be below min surge lookup value b/c we created
+                # lookup such that < min value will be 0 impact
                 if rh_diff_arr.max() > this_surge_lookup.rh_diff.max():
                     raise ValueError(error_str.format("rh_diff", "higher", "maximum"))
                 if rh_diff_arr.min() < this_surge_lookup.rh_diff.min():
                     raise ValueError(error_str.format("rh_diff", "lower", "minimum"))
                 if lslr_arr.max() > this_surge_lookup.lslr.max():
                     raise ValueError(error_str.format("lslr", "higher", "maximum"))
-                if lslr_arr.min() < this_surge_lookup.lslr.min():
-                    raise ValueError(error_str.format("lslr", "lower", "minimum"))
 
             for seg in inputs.seg.values:
                 this_surge_lookup = (
