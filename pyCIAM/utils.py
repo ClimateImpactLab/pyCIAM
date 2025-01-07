@@ -94,8 +94,7 @@ def _get_lslr_plan_data(
     if diaz_negative_retreat:
         RH_heights = _pos(RH_heights)
     else:
-        for i in range(1, len(RH_heights.at)):
-            RH_heights[{"at": i}] = RH_heights.isel(at=slice(None, i + 1)).max("at")
+        RH_heights = RH_heights.cumulative("at").max()
 
     # set initial RH_heights to 0 (e.g.
     # assuming no retreat or protection anywhere such that both w/ and w/o climate

@@ -332,6 +332,33 @@ def calc_costs(
             # interpolation with 0's
             surge_noadapt = []
             surge = []
+
+            def _check_vals(rh_diff_arr, lslr_arr, seg, check_rh_diff_max=True):
+                # for surge_noadapt, rh_diff can be greater than max. This happens when
+                # a segment chooses retreat10000 in their refA (initial adaptation) and
+                # also has a declining no-climate-change SLR scenario (e.g. for
+                # no-climate-change scenarios). However, we automatically assign 0
+                # expected storm impacts for retreat10000, so this is acceptable and
+                # does not need to exist in the surge lookup table.
+                error_str = (
+                    "{0} value is {1} than {2} in storm damage lookup "
+                    f"table for segment {seg}. Please investigate why this is. You may "
+                    "need to re-generate the surge lookup table (or perhaps the `refA` "
+                    "(initial adaptation) table if it was generated for a different "
+                    "set of SLR scenarios or years."
+                )
+                # lslr is allowed to be below min surge lookup value b/c we created
+                # lookup such that < min value will be 0 impact
+                if (
+                    check_rh_diff_max
+                    and rh_diff_arr.max() > this_surge_lookup.rh_diff.max()
+                ):
+                    raise ValueError(error_str.format("rh_diff", "higher", "maximum"))
+                if rh_diff_arr.min() < this_surge_lookup.rh_diff.min():
+                    raise ValueError(error_str.format("rh_diff", "lower", "minimum"))
+                if lslr_arr.max() > this_surge_lookup.lslr.max():
+                    raise ValueError(error_str.format("lslr", "higher", "maximum"))
+
             for seg in inputs.seg.values:
                 this_surge_lookup = (
                     surge_lookup.sel(seg=seg)
@@ -341,32 +368,58 @@ def calc_costs(
                 )
                 if this_surge_lookup.sum() == 0:
                     continue
-                surge_noadapt.append(
+
+                this_rh_diff_noadapt = rh_diff_noadapt.sel(seg=seg, drop=True)
+                this_lslr = lslr.sel(seg=seg, drop=True)
+                _check_vals(
+                    this_rh_diff_noadapt, this_lslr, seg, check_rh_diff_max=False
+                )
+
+                lslr_too_low = this_lslr < this_surge_lookup.lslr.min()
+
+                this_surge_noadapt = (
                     this_surge_lookup.sel(adapttype="retreat", drop=True)
                     .interp(
-                        lslr=lslr.sel(seg=seg),
-                        rh_diff=rh_diff_noadapt.sel(seg=seg),
+                        lslr=this_lslr,
+                        rh_diff=this_rh_diff_noadapt,
                         assume_sorted=True,
-                        kwargs={"fill_value": 0},
                     )
                     .reset_coords(drop=True)
                     .expand_dims(seg=[seg])
                 )
 
+                # ensure nans are only at the low end of LSLR or high end of rh_diff
+                rh_diff_too_high = (
+                    this_rh_diff_noadapt > this_surge_lookup.rh_diff.max()
+                )
+                assert (
+                    this_surge_noadapt.notnull() | lslr_too_low | rh_diff_too_high
+                ).all(), seg
+
+                surge_noadapt.append(this_surge_noadapt.fillna(0))
+
                 surge_adapt = []
+
+                this_rh_diff_adapt = rh_diff.sel(seg=seg, drop=True)
+                _check_vals(this_rh_diff_adapt, this_lslr, seg)
+
                 for adapttype in this_surge_lookup.adapttype.values:
-                    surge_adapt.append(
+                    this_surge_adapt = (
                         this_surge_lookup.sel(adapttype=adapttype)
                         .interp(
-                            lslr=lslr.sel(seg=seg),
-                            rh_diff=rh_diff.sel(
-                                adapttype=adapttype, seg=seg, drop=True
+                            lslr=this_lslr,
+                            rh_diff=this_rh_diff_adapt.sel(
+                                adapttype=adapttype, drop=True
                             ),
                             assume_sorted=True,
-                            kwargs={"fill_value": 0},
                         )
                         .reset_coords(drop=True)
                     )
+
+                    # ensure nans are only at the low end of lslr
+                    assert (this_surge_adapt.notnull() | lslr_too_low).all(), seg
+
+                    surge_adapt.append(this_surge_adapt.fillna(0))
                 surge.append(
                     xr.concat(surge_adapt, dim=this_surge_lookup.adapttype).expand_dims(
                         seg=[seg]
@@ -1066,7 +1119,6 @@ def execute_pyciam(
     # determine whether to check for finished jobs
     if output_path is None:
         check = False
-        tmp_output_path = None
     else:
         check = True
 
@@ -1149,7 +1201,7 @@ def execute_pyciam(
                 storage_options=storage_options,
             )
     # block on this calculation
-    wait(surge_futs)
+    client.gather(surge_futs)
 
     ###############################
     # define temporary output store
@@ -1372,7 +1424,7 @@ def execute_pyciam(
     ###############################
     # Rechunk and save final
     ###############################
-    wait(ciam_futs_2.tolist())
+    client.gather(ciam_futs_2.tolist())
     assert [f.status == "finished" for f in ciam_futs_2.tolist()]
     client.cancel(ciam_futs_2)
     del ciam_futs_2
@@ -1465,7 +1517,9 @@ def get_refA(
             **params.refA_scenario_selectors,
         )
         slr = slr.unstack("scen_mc")
-    slr = slr.squeeze(drop=True)
+    slr = slr.squeeze(
+        [d for d in slr.dims if len(slr[d]) == 1 and d != "seg"], drop=True
+    )
 
     costs, refA = calc_costs(
         inputs, slr, surge_lookup=surge, return_year0_hts=True, **model_kwargs
