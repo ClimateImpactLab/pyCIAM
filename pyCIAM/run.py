@@ -401,7 +401,7 @@ def calc_costs(
                 surge_adapt = []
 
                 this_rh_diff_adapt = rh_diff.sel(seg=seg, drop=True)
-                _check_vals(this_rh_diff_noadapt, this_lslr, seg)
+                _check_vals(this_rh_diff_adapt, this_lslr, seg)
 
                 for adapttype in this_surge_lookup.adapttype.values:
                     this_surge_adapt = (
