@@ -1521,7 +1521,7 @@ def get_refA(
         [d for d in slr.dims if len(slr[d]) == 1 and d != "seg"], drop=True
     )
 
-    return calc_costs(
+    costs, refA = calc_costs(
         inputs, slr, surge_lookup=surge, return_year0_hts=True, **model_kwargs
     )
 
