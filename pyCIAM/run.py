@@ -1425,7 +1425,6 @@ def execute_pyciam(
     # Rechunk and save final
     ###############################
     client.gather(ciam_futs_2.tolist())
-    assert [f.status == "finished" for f in ciam_futs_2.tolist()]
     client.cancel(ciam_futs_2)
     del ciam_futs_2
 
@@ -1437,7 +1436,7 @@ def execute_pyciam(
             storage_options=storage_options,
             chunks={"case": -1, seg_var: this_chunksize},
         )
-        .drop("npv")
+        .drop_vars("npv")
         .chunk({"year": 10})
         .persist()
     )
