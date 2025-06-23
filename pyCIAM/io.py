@@ -9,7 +9,6 @@ Functions
 """
 
 import tempfile
-from collections.abc import Iterable
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
@@ -548,9 +547,9 @@ def save_to_zarr_region(ds_in, store, already_aligned=False, storage_options={})
         n_valid = len(valid_ixs)
         st = valid_ixs[0]
         end = valid_ixs[-1]
-        assert (
-            end - st == n_valid - 1
-        ), f"Indices are not continuous along dimension {r}"
+        assert end - st == n_valid - 1, (
+            f"Indices are not continuous along dimension {r}"
+        )
         regions[r] = slice(st, end + 1)
 
     # align coords
@@ -692,7 +691,7 @@ def load_ciam_inputs(
         seg_vals,
         # dropping the "refA_scenario_selectors" b/c this doesn't need to be added to
         # the input dataset object
-        constants=params[params.map(type) != dict].to_dict(),
+        constants=params[params.map(type) != dict].to_dict(),  # noqa: E721
         seg_var=seg_var,
         selectors=selectors,
         storage_options=storage_options,
@@ -791,7 +790,7 @@ def load_diaz_inputs(
     inputs = prep_sliiders(
         input_store,
         seg_vals,
-        constants=params[params.map(type) != dict].to_dict(),
+        constants=params[params.map(type) != dict].to_dict(),  # noqa: E721
         seg_var="seg",
         calc_popdens_with_wetland_area=False,
         storage_options=storage_options,
@@ -861,7 +860,7 @@ def download_and_extract_partial_zip(lpath, url, zip_glob, n_retries=5):
         if not fl.is_file():
             retries = 0
             while retries < n_retries:
-                print(f"...Downloading {fl.name} (attempt {retries+1}/{n_retries})")
+                print(f"...Downloading {fl.name} (attempt {retries + 1}/{n_retries})")
                 try:
                     data = z.cat_file(fr)
                     break

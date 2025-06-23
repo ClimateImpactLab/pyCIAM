@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from cloudpathlib import AnyPath, CloudPath
-from distributed import Client, wait
+from distributed import Client
 from rhg_compute_tools.xarray import dataarray_from_delayed
 
 from pyCIAM.constants import CASE_DICT, CASES, COSTTYPES, PLIST, RLIST, SOLVCASES
