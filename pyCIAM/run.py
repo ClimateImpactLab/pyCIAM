@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from cloudpathlib import AnyPath, CloudPath
-from distributed import Client, wait
+from distributed import Client
 from rhg_compute_tools.xarray import dataarray_from_delayed
 
 from pyCIAM.constants import CASE_DICT, CASES, COSTTYPES, PLIST, RLIST, SOLVCASES
@@ -951,6 +951,7 @@ def execute_pyciam(
     diaz_config=False,
     dask_client_func=Client,
     storage_options=None,
+    params_override={},
     **model_kwargs,
 ):
     """Execute the full pyCIAM model. The following inputs are assumed:
@@ -1082,6 +1083,8 @@ def execute_pyciam(
         reflected in `storage_options["token"]`. Other cloud storage providers will have
         different authentication methods and have not yet been tested with this
         function.
+    params_override : dict, default {}
+        Used to override params specified in `params_path`
     **model_kwargs
         Passed directly to :py:func:`pyCIAM.calc_costs`
     """
@@ -1115,6 +1118,7 @@ def execute_pyciam(
 
     # read parameters
     params = pd.read_json(params_path)["values"]
+    params.update(params_override)
 
     # determine whether to check for finished jobs
     if output_path is None:
@@ -1276,6 +1280,10 @@ def execute_pyciam(
                 compute=False,
                 mode="w",
                 storage_options=storage_options,
+                encoding={
+                    "costs": {"fill_value": "NaN"},
+                    "optimal_case": {"fill_value": 255},
+                },
             )
 
     ####################################################
@@ -1469,8 +1477,6 @@ def execute_pyciam(
         .costs.notnull()
         .all()
     )
-    client.cluster.close()
-    client.close()
     if remove_tmpfile:
         if isinstance(tmp_output_path, CloudPath):
             tmp_output_path.rmtree()

@@ -56,7 +56,6 @@ pyCIAM contains only a handful of public functions that a user will want to empl
 * `execute_pyciam`: This is the end-to-end function that represents the most likely entrypoint for users. All other public functions are called by this one.
 * `create_surge_lookup`: Creates a lookup table that can be leveraged to build a 2D linear spline function for calculating damages from extreme sea levels. This can drastically reduce computational expense required for simulation on large ensembles of sea level rise trajectories.
 * `load_ciam_inputs`: An I/O function to load SLIIDERS-like input data, storm surge damage lookup table (if specified), model parameters, and process/format these data for inclusion in pyCIAM.
-* `load_diaz_inputs`: A similar function to load a preprocessed SLIIDERS-like input dataset that is generated from the same input data used in Diaz 2016. This is used to generate comparisons to the Diaz 2016 results within Depsky et al. 2023.
 * `calc_costs`: This is the main computation engine in pyCIAM. It computes costs for all cost types, regions, years, socioeconomic and SLR trajectories, and adaptation case. It does *not* compute the optimal adaptation case, which must be computed afterward, for reasons described below.
 * `select_optimal_case`: This function calculates the optimal adaptation choice for a given region and returns the associated costs and NPV.
 
