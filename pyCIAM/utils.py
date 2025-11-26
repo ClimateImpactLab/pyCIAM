@@ -116,7 +116,7 @@ def spherical_nearest_neighbor(df1, df2, x1="lon", y1="lat", x2="lon", y2="lat")
     return pd.Series(df2.index[ixs[:, 0]], index=df1.index)
 
 
-def add_attrs_to_result(ds):
+def add_attrs_to_result(ds, seg_var):
     attr_dict = {
         "case": {
             "long_name": "Adaptation Strategy",
@@ -184,13 +184,19 @@ def add_attrs_to_result(ds):
     extra_vars = [
         v
         for v in ds.variables
-        if v not in ["year", "seg_adm", "npv"] + list(attr_dict.keys())
+        if v not in ["year", seg_var, "npv"] + list(attr_dict.keys())
     ]
     assert not len(extra_vars), f"Unexpected variables: {extra_vars}"
     for v in ds.variables:
         if v in attr_dict:
             ds[v].attrs.update(attr_dict[v])
     return ds
+
+
+def _get_exp_year(da):
+    exp_year = [v for v in da.data_vars if v.startswith("pop_") and "scale" not in v]
+    assert len(exp_year) == 1, exp_year
+    return int(exp_year[0].split("_")[1])
 
 
 def collapse_econ_inputs_to_seg(
@@ -222,10 +228,15 @@ def collapse_econ_inputs_to_seg(
         sliiders.ypcc.sel(country="USA", drop=True).load().reset_coords(drop=True)
     )
 
+    # allow for different base years in K and pop spatial variables
+    exp_year = _get_exp_year(sliiders)
+    pop_var = f"pop_{exp_year}"
+    k_var = f"K_{exp_year}"
+
     out = (
-        sliiders[["K_2019", "pop_2019", "landarea", "length", "wetland"]]
+        sliiders[[k_var, pop_var, "landarea", "length", "wetland"]]
         .groupby(grouper)
-        .sum("seg_adm")
+        .sum(seg_var)
     )
 
     out[["surge_height", "gumbel_params", "seg_lon", "seg_lat"]] = (
@@ -246,13 +257,13 @@ def collapse_econ_inputs_to_seg(
     for v, w in [
         (
             "mobcapfrac",
-            sliiders.K_2019.sum("elev"),
+            sliiders[k_var].sum("elev"),
         ),
-        ("pop_scale", sliiders.pop_2019.sum("elev")),
-        ("K_scale", sliiders.K_2019.sum("elev")),
+        ("pop_scale", sliiders[pop_var].sum("elev")),
+        ("K_scale", sliiders[k_var].sum("elev")),
         ("interior", sliiders.landarea.sum("elev")),
         ("pc", sliiders.length),
-        ("ypcc", sliiders.pop_2019.sum("elev")),
+        ("ypcc", sliiders[pop_var].sum("elev")),
         ("wetlandservice", sliiders.wetland.sum("elev")),
     ]:
         weighted_avg(v, w)
