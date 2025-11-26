@@ -22,7 +22,7 @@ import xarray as xr
 from fsspec import FSTimeoutError
 from fsspec.implementations.zip import ZipFileSystem
 
-from pyCIAM.utils import copy
+from pyCIAM.utils import _get_exp_year, copy
 from pyCIAM.utils import spherical_nearest_neighbor as snn
 
 from .utils import _s2d
@@ -124,19 +124,16 @@ def prep_sliiders(
             * (inputs.ypcc / ref_income) ** inputs.vsl_inc_elast
         )
 
-    if expand_exposure and "pop" not in inputs.data_vars:
-        exp_year = [
-            v for v in inputs.data_vars if v.startswith("pop_") and "scale" not in v
-        ]
-        assert len(exp_year) == 1, exp_year
-        exp_year = exp_year[0].split("_")[1]
-        pop_var = "pop_" + exp_year
-        inputs["pop"] = inputs[pop_var] * inputs.pop_scale
-        inputs = inputs.drop(pop_var)
-    if expand_exposure and "K" not in inputs.data_vars:
-        K_var = "K_" + exp_year
-        inputs["K"] = inputs[K_var] * inputs.K_scale
-        inputs = inputs.drop(K_var)
+    if expand_exposure:
+        exp_year = _get_exp_year(inputs)
+        if "pop" not in inputs.data_vars:
+            pop_var = f"pop_{exp_year}"
+            inputs["pop"] = inputs[pop_var] * inputs.pop_scale
+            inputs = inputs.drop(pop_var)
+        if "K" not in inputs.data_vars:
+            K_var = f"K_{exp_year}"
+            inputs["K"] = inputs[K_var] * inputs.K_scale
+            inputs = inputs.drop(K_var)
     if "dfact" not in inputs.data_vars and "npv_start" in inputs.data_vars:
         inputs["dfact"] = (1 / (1 + inputs.dr)) ** (inputs.year - inputs.npv_start)
 
