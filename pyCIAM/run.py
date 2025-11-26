@@ -936,6 +936,7 @@ def execute_pyciam(
     tmp_output_path=AnyPath("pyciam_tmp_results.zarr"),
     remove_tmpfile=True,
     overwrite=False,
+    no_surge_check=False,
     mc_dim="quantile",
     seg_var="seg_adm",
     seg_var_subset=None,
@@ -1019,6 +1020,8 @@ def execute_pyciam(
         want to examine seg-adm level results.
     ovewrwrite : bool, default False
         If True, overwrite all intermediate output files
+    no_surge_check : bool, default False
+        If True, assume surge lookup tables are complete and do not load to check.
     mc_dim : str, default "quantile"
         The dimension of the sea level rise datasets specified at `slr_input_paths` that
         indexes different simulations within the same scenario. This could reflect Monte
@@ -1079,12 +1082,12 @@ def execute_pyciam(
         some environment variables in order for the :py:mod:`cloudpathlib` objects to
         function correctly. For example, if your data exists on Google Cloud Storage and
         requires authentication, you would need to set the
-        `GOOGLE_APPLICATION_CREDENTIALS` environment variable to the same path as
-        reflected in `storage_options["token"]`. Other cloud storage providers will have
+        ``GOOGLE_APPLICATION_CREDENTIALS`` environment variable to the same path as
+        reflected in ``storage_options["token"]``. Other cloud storage providers will have
         different authentication methods and have not yet been tested with this
         function.
     params_override : dict, default {}
-        Used to override params specified in `params_path`
+        Used to override params specified in ``params_path``.
     **model_kwargs
         Passed directly to :py:func:`pyCIAM.calc_costs`
     """
@@ -1176,7 +1179,7 @@ def execute_pyciam(
     for var, path in surge_input_paths.items():
         if path is None:
             continue
-        if overwrite or not path.is_dir():
+        if not no_surge_check:
             if var == seg_var:
                 this_econ_input = econ_input_path
             elif var == "seg":
@@ -1199,7 +1202,7 @@ def execute_pyciam(
                 slr_0_years=params.slr_0_year,
                 client=client,
                 client_kwargs={"batch_size": surge_batchsize},
-                force_overwrite=True,
+                force_overwrite=overwrite,
                 seg_chunksize=surge_seg_chunksize,
                 mc_dim=mc_dim,
                 storage_options=storage_options,
@@ -1272,7 +1275,7 @@ def execute_pyciam(
 
         # add attrs
         out_ds.attrs.update(attr_dict)
-        out_ds = add_attrs_to_result(out_ds)
+        out_ds = add_attrs_to_result(out_ds, seg_var)
 
         if overwrite or not tmp_output_path.is_dir():
             out_ds.to_zarr(
@@ -1340,7 +1343,10 @@ def execute_pyciam(
             i += most_segadm
         else:
             this_group = this_group.isel(
-                {seg_var: this_group.seg != this_group.seg.isel(seg_adm=-1, drop=True)}
+                {
+                    seg_var: this_group.seg
+                    != this_group.seg.isel({seg_var: -1}, drop=True)
+                }
             )
             i += len(this_group[seg_var])
 
@@ -1378,7 +1384,17 @@ def execute_pyciam(
             **model_kwargs,
         )
     )
-
+    return xr.concat(
+        client.gather(
+            client.map(
+                optimize_case_seg,
+                ciam_futs,
+                dfact=test_inputs.dfact,
+                npv_start=test_inputs.npv_start,
+            )
+        ),
+        dim="seg",
+    )
     if output_path is None and seg_var == "seg":
         out = add_attrs_to_result(
             xr.concat(
@@ -1391,7 +1407,8 @@ def execute_pyciam(
                     )
                 ),
                 dim="seg",
-            )
+            ),
+            seg_var,
         )
         out.attrs.update(attr_dict)
         return out

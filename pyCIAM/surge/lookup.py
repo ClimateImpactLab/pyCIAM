@@ -24,7 +24,11 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from pyCIAM.io import _load_lslr_for_ciam, save_to_zarr_region
+from pyCIAM.io import (
+    _load_lslr_for_ciam,
+    check_finished_zarr_workflow,
+    save_to_zarr_region,
+)
 from pyCIAM.surge._calc import (
     _calc_storm_damages_no_resilience,
     _get_surge_heights_probs,
@@ -241,9 +245,18 @@ def _save_storm_dam(
     mc_dim="mc_sample_id",
     start_year=None,
     slr_0_years=2005,
+    overwrite=False,
     storage_options={},
 ):
     """Map over each chunk to run through damage calcs."""
+
+    if not overwrite and check_finished_zarr_workflow(
+        surge_lookup_store,
+        varname="frac_losses",
+        final_selector={seg_var: seg_vals},
+        storage_options=storage_options,
+    ):
+        return None
     diff_ranges = _get_lslr_rhdiff_range(
         sliiders_store,
         slr_stores,
@@ -499,6 +512,7 @@ def create_surge_lookup(
             start_year=start_year,
             slr_0_years=slr_0_years,
             storage_options=storage_options,
+            overwrite=force_overwrite,
             **client_kwargs,
         )
     )
