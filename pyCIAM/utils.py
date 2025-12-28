@@ -116,7 +116,7 @@ def spherical_nearest_neighbor(df1, df2, x1="lon", y1="lat", x2="lon", y2="lat")
     return pd.Series(df2.index[ixs[:, 0]], index=df1.index)
 
 
-def add_attrs_to_result(ds, seg_var):
+def add_attrs_to_result(ds, seg_var, mc_dim=None):
     attr_dict = {
         "case": {
             "long_name": "Adaptation Strategy",
@@ -180,7 +180,18 @@ def add_attrs_to_result(ds, seg_var):
             "long_name": "Shared Socioeconomic Pathway",
             "description": "Socioeconomic growth model used",
         },
+        "refA": {
+            "long_name": "Initial adaptation height",
+            "description": (
+                "Initial retreat height assumed in model. Determined by choosing "
+                "optimal adaptation pathway under a 'no-climate-change' scenario and "
+                "selecting the initial height. Retreat is assumed regardless of "
+                "whether optimal path is retreat or protect."
+            ),
+        },
     }
+    if mc_dim is not None:
+        attr_dict[mc_dim] = {"long_name": "Monte carlo sample index"}
     extra_vars = [
         v
         for v in ds.variables
@@ -205,7 +216,7 @@ def collapse_econ_inputs_to_seg(
     seg_var_subset=None,
     output_chunksize=100,
     seg_var="seg_adm",
-    storage_options={},
+    storage_options=None,
 ):
     sliiders = subset_econ_inputs(
         xr.open_zarr(
@@ -265,8 +276,10 @@ def collapse_econ_inputs_to_seg(
         ("pc", sliiders.length),
         ("ypcc", sliiders[pop_var].sum("elev")),
         ("wetlandservice", sliiders.wetland.sum("elev")),
+        ("vsl", sliiders[pop_var].sum("elev")),
     ]:
-        weighted_avg(v, w)
+        if v in sliiders.data_vars:
+            weighted_avg(v, w)
 
     out["rho"] = out.ypcc / (out.ypcc + usa_ypcc_ref.sel(year=2000, drop=True))
 
