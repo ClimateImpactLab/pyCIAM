@@ -15,8 +15,9 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from cloudpathlib import AnyPath, CloudPath
-from distributed import Client
-from rhg_compute_tools.xarray import dataarray_from_delayed
+from distributed import Client, as_completed
+from numpy.dtypes import StringDType
+from rhg_compute_tools.xarray import dataset_from_delayed
 
 from pyCIAM.constants import CASE_DICT, CASES, COSTTYPES, PLIST, RLIST, SOLVCASES
 from pyCIAM.io import (
@@ -24,7 +25,6 @@ from pyCIAM.io import (
     create_template_dataarray,
     load_ciam_inputs,
     load_diaz_inputs,
-    save_to_zarr_region,
 )
 from pyCIAM.surge import damage_funcs, lookup
 from pyCIAM.surge._calc import (
@@ -783,7 +783,8 @@ def calc_costs(
                     "protection": xr.zeros_like(abandonment),
                 }
             ),
-        )
+        ),
+        compat="no_conflicts",
     ).to_array("costtype")
     del abandonment, relocation_r, wetland_r_noadapt
 
@@ -800,7 +801,8 @@ def calc_costs(
                     "protection": protection,
                 }
             ),
-        )
+        ),
+        compat="no_conflicts",
     ).to_array("costtype")
     del protection, wetland_p
 
@@ -854,7 +856,7 @@ def select_optimal_case(
     seg_regions,
     eps=1,
     region_var="seg_adm",
-    storage_options={},
+    storage_options=None,
 ):
     """Calculate the least-cost adaptation path for a given `region`, which is nested
     within a given coastal segment. All regions within a segment must take the same
@@ -938,16 +940,21 @@ def execute_pyciam(
     overwrite=False,
     no_surge_check=False,
     mc_dim="quantile",
+    slr_site_id_dim="site_id",
     seg_var="seg_adm",
     seg_var_subset=None,
     adm_var="adm1",
+    lsl_var="lsl_msl05",
+    scen_mc_filter=None,
     quantiles=[0.5],
+    refA_quantile=0.5,
     extra_attrs={},
     econ_input_seg_chunksize=100,
     surge_batchsize=700,
     surge_seg_chunksize=5,
     refA_seg_chunksize=500,
     pyciam_seg_chunksize=3,
+    other_chunksizes={},
     diaz_inputs=False,
     diaz_config=False,
     dask_client_func=Client,
@@ -1023,10 +1030,13 @@ def execute_pyciam(
     no_surge_check : bool, default False
         If True, assume surge lookup tables are complete and do not load to check.
     mc_dim : str, default "quantile"
-        The dimension of the sea level rise datasets specified at `slr_input_paths` that
-        indexes different simulations within the same scenario. This could reflect Monte
-        Carlo simulations *or* different quantiles of SLR. Ignored if
+        The dimension of the sea level rise datasets specified at ``slr_input_paths``
+        that indexes different simulations within the same scenario. This could reflect
+        Monte Carlo simulations *or* different quantiles of SLR. Ignored if
         `diaz_inputs=True`.
+    slr_site_id_dim : str, default "site_id"
+        The dimension of the SLR datasets specified at ``slr_input_paths`` that indexes
+        location of the estimate.
     seg_var : str, default "seg_adm"
         The coordinate of the socioeconomic input data specified at `econ_input_path`
         that indexes the intersection of coastal segments and administrative units.
@@ -1038,6 +1048,12 @@ def execute_pyciam(
         The coordinate of the socioeconomic input data specified at `econ_input_path`
         that specifies the administrative unit associated with each admin/seg
         intersection (`seg_var`). Ignored if `seg_var=="seg"`
+    lsl_var : str, default "lsl_msl05"
+        The name of the variable in ``slr_input_paths`` containing local SLR values
+    scen_mc_filter : :py:class:`pandas.MultiIndex`, optional
+        A Index of paired ``scenario`` (str) and ``mc_sample_id`` (int) values that
+        specify a subset of the individual SLR trajectories contained in the zarr stores
+        at ``slr_input_paths``. If None, run all scenario X MC sample combinations.
     quantiles : Optional[Iterable[float]], default [0.5]
         The quantiles of the sea level rise datasets specified at `slr_input_paths` that
         will be used to estimate costs within this function. If `mc_dim=="quantile"`, it
@@ -1045,6 +1061,9 @@ def execute_pyciam(
         values of the "quantile" coordinate in each SLR dataset. If not, then quantiles
         over the simulations indexed by `mc_dim` will be calculated on-the-fly. If None,
         all simulations indexed by `mc_dim` will be used.
+    refA_quantile : float, default 0.5
+        Quantile of SLR for "no-climate-change" scenario to use for defining refA (the
+        initial adaptation height).
     extra_attrs : dict[str, str], optional
         Additional attributes to write to the output dataset.
     econ_input_seg_chunksize : int, default 100
@@ -1163,6 +1182,7 @@ def execute_pyciam(
         econ_input_path_seg = econ_input_path
     else:
         if overwrite or not econ_input_path_seg.is_dir():
+            print("Creating seg-level econ input dataset...")
             collapse_econ_inputs_to_seg(
                 econ_input_path,
                 econ_input_path_seg,
@@ -1175,7 +1195,9 @@ def execute_pyciam(
     ########################################
     # create surge lookup table if necessary
     ########################################
-    surge_futs = {}
+
+    surge_futs = []
+    print("Creating ESL impacts lookup table if it does not exist...")
     for var, path in surge_input_paths.items():
         if path is None:
             continue
@@ -1186,7 +1208,7 @@ def execute_pyciam(
                 this_econ_input = econ_input_path_seg
             else:
                 raise ValueError(var)
-            surge_futs[var] = lookup.create_surge_lookup(
+            surge_futs += lookup.create_surge_lookup(
                 this_econ_input,
                 slr_input_paths,
                 path,
@@ -1205,10 +1227,15 @@ def execute_pyciam(
                 force_overwrite=overwrite,
                 seg_chunksize=surge_seg_chunksize,
                 mc_dim=mc_dim,
+                slr_site_id_dim=slr_site_id_dim,
+                lsl_var=lsl_var,
                 storage_options=storage_options,
             )
     # block on this calculation
-    client.gather(surge_futs)
+    for f in as_completed(surge_futs, raise_errors=False):
+        if f.status != "finished":
+            f.result()
+        surge_futs.pop(f)
 
     ###############################
     # define temporary output store
@@ -1231,96 +1258,119 @@ def execute_pyciam(
             econ_input_path,
             slr_input_paths,
             params,
-            [this_seg],
+            selectors={seg_var: [this_seg]},
             slr_names=slr_names,
             seg_var=seg_var,
+            lsl_var=lsl_var,
             surge_lookup_store=None,
             mc_dim=mc_dim,
+            slr_site_id_dim=slr_site_id_dim,
+            scen_mc_filter=scen_mc_filter,
             quantiles=quantiles,
             storage_options=storage_options,
         )
-        slr = test_inputs[1].unstack("scen_mc")
-        test_inputs = test_inputs[0]
+        test_inputs, slr, _ = test_inputs
+        if scen_mc_filter is None:
+            coords = {"scenario": slr.scenario.values}
+            if quantiles is not None:
+                coords["quantiles"] = quantiles
+            else:
+                coords[mc_dim] = slr[mc_dim]
+        else:
+            if quantiles is not None:
+                raise ValueError(
+                    "Cannot specify both ``scen_mc_filter`` and ``quantiles``."
+                )
+            coords = {"scen_mc": slr["scen_mc"]}
 
-    if output_path is not None:
-        coords = OrderedDict(
-            {
-                "case": CASES,
-                "costtype": COSTTYPES,
-                seg_var: ciam_in[seg_var].values,
-                "scenario": slr.scenario.astype("unicode"),
-                "quantile": quantiles,
-                "year": np.arange(params.model_start, ciam_in.year.max().item() + 1),
-                **{
-                    dim: ciam_in[dim].values
-                    for dim in ["ssp", "iam"]
-                    if dim in ciam_in.dims
-                },
-            }
+    coords = OrderedDict(
+        {
+            "case": np.array(CASES, dtype=StringDType),
+            "costtype": np.array(COSTTYPES, dtype=StringDType),
+            seg_var: ciam_in[seg_var].values,
+            "year": np.arange(params.model_start, ciam_in.year.max().item() + 1),
+            **coords,
+            **{
+                dim: ciam_in[dim].values
+                for dim in ["ssp", "iam"]
+                if dim in ciam_in.dims
+            },
+        }
+    )
+
+    chunks = {seg_var: 1, "case": len(coords["case"]) - 1, **other_chunksizes}
+    chunks = {k: len(coords[k]) if k not in chunks else chunks[k] for k in coords}
+
+    # create arrays
+    cost_dims = coords.keys()
+    costs = create_template_dataarray(cost_dims, coords, chunks)
+
+    nonpvdims = ["year", "costtype"]
+    nooptcasedims = nonpvdims + ["case"]
+
+    def _create_smaller_array(nodims):
+        return create_template_dataarray(
+            [k for k in cost_dims if k not in nodims],
+            coords,
+            chunks,
         )
 
-        chunks = {seg_var: 1, "case": len(coords["case"]) - 1}
-        chunks = {k: -1 if k not in chunks else chunks[k] for k in coords}
+    npv = _create_smaller_array(nonpvdims)
+    optcase = _create_smaller_array(nooptcasedims)
 
-        # create arrays
-        cost_dims = coords.keys()
+    out_ds = xr.Dataset({"costs": costs, "npv": npv, "optimal_case": optcase})
 
-        out_ds = create_template_dataarray(cost_dims, coords, chunks).to_dataset(
-            name="costs"
+    # add attrs
+    out_ds.attrs.update(attr_dict)
+    out_ds = add_attrs_to_result(out_ds, seg_var, mc_dim=mc_dim)
+
+    if output_path is not None and (overwrite or not tmp_output_path.is_dir()):
+        print("Creating output skeleton...")
+        out_ds.to_zarr(
+            str(tmp_output_path),
+            compute=False,
+            mode="w",
+            storage_options=storage_options,
+            safe_chunks=False,
         )
-        out_ds["npv"] = out_ds.costs.isel(year=0, costtype=0, drop=True).astype(
-            "float64"
-        )
-        out_ds["optimal_case"] = out_ds.npv.isel(case=0, drop=True).astype("uint8")
-
-        # add attrs
-        out_ds.attrs.update(attr_dict)
-        out_ds = add_attrs_to_result(out_ds, seg_var)
-
-        if overwrite or not tmp_output_path.is_dir():
-            out_ds.to_zarr(
-                str(tmp_output_path),
-                compute=False,
-                mode="w",
-                storage_options=storage_options,
-                encoding={
-                    "costs": {"fill_value": "NaN"},
-                    "optimal_case": {"fill_value": 255},
-                },
-            )
 
     ####################################################
     # Create initial adaptaion heights dataset if needed
     ####################################################
     if overwrite or not refA_path.is_dir():
+        print("Estimating baseline adaptation RPs...")
         segs = np.unique(ciam_in.seg)
-        seg_grps = [
-            segs[i : i + refA_seg_chunksize]
+        seg_groups = [
+            slice(segs[i], segs[min(i + refA_seg_chunksize - 1, len(segs) - 1)])
             for i in range(0, len(segs), refA_seg_chunksize)
         ]
 
-        (
-            dataarray_from_delayed(
-                client.map(
-                    get_refA,
-                    seg_grps,
-                    econ_input_path=econ_input_path_seg,
-                    slr_input_path=slr_input_paths[0],
-                    params=params,
-                    surge_input_path=surge_input_paths["seg"],
-                    mc_dim=mc_dim,
-                    storage_options=storage_options,
-                    quantiles=quantiles,
-                    diaz_inputs=diaz_inputs,
-                    eps=eps,
-                    **model_kwargs,
-                ),
-                dim="seg",
-            )
-            .to_dataset(name="refA")
-            .chunk({"seg": -1})
-            .to_zarr(str(refA_path), storage_options=storage_options, mode="w")
+        refA_futs = client.map(
+            get_refA,
+            seg_groups,
+            econ_input_path=econ_input_path_seg,
+            slr_input_path=slr_input_paths[0],
+            params=params,
+            surge_input_path=surge_input_paths["seg"],
+            mc_dim=mc_dim,
+            slr_site_id_dim=slr_site_id_dim,
+            lsl_var=lsl_var,
+            storage_options=storage_options,
+            quantile=refA_quantile,
+            scen_mc_filter=scen_mc_filter,
+            diaz_inputs=diaz_inputs,
+            eps=eps,
+            **model_kwargs,
         )
+        refA_ds = dataset_from_delayed(refA_futs, dim="seg")
+        for v in refA_ds.data_vars:
+            refA_ds[v].attrs = {}
+        refA_ds = add_attrs_to_result(
+            refA_ds.rename(case="optimal_case"), "seg", mc_dim=mc_dim
+        ).rename(optimal_case="case")
+        refA_ds.to_zarr(str(refA_path), mode="w")
+    else:
+        print("Baseline adaptation RPs already calculated...")
 
     ###############################
     # get groups for running pyCIAM
@@ -1377,6 +1427,9 @@ def execute_pyciam(
             surge_input_path=surge_input_paths[seg_var],
             seg_var=seg_var,
             mc_dim=mc_dim,
+            slr_site_id_dim=slr_site_id_dim,
+            lsl_var=lsl_var,
+            scen_mc_filter=scen_mc_filter,
             quantiles=quantiles,
             storage_options=storage_options,
             diaz_inputs=diaz_inputs,
@@ -1384,17 +1437,7 @@ def execute_pyciam(
             **model_kwargs,
         )
     )
-    return xr.concat(
-        client.gather(
-            client.map(
-                optimize_case_seg,
-                ciam_futs,
-                dfact=test_inputs.dfact,
-                npv_start=test_inputs.npv_start,
-            )
-        ),
-        dim="seg",
-    )
+
     if output_path is None and seg_var == "seg":
         out = add_attrs_to_result(
             xr.concat(
@@ -1409,6 +1452,7 @@ def execute_pyciam(
                 dim="seg",
             ),
             seg_var,
+            mc_dim=mc_dim,
         )
         out.attrs.update(attr_dict)
         return out
@@ -1508,12 +1552,24 @@ def get_refA(
     params,
     surge_input_path=None,
     mc_dim="quantile",
-    storage_options={},
-    quantiles=[0.5],
+    slr_site_id_dim="site_id",
+    lsl_var="lsl_msl05",
+    storage_options=None,
+    quantile=0.5,
     eps=1,
+    scen_mc_filter=None,
     diaz_inputs=False,
+    output_path=None,
     **model_kwargs,
 ):
+    if check_finished_zarr_workflow(
+        finalstore=output_path,
+        varname="refA",
+        storage_options=storage_options,
+        final_selector={"seg": segs},
+    ):
+        return None
+
     if diaz_inputs:
         inputs, slr = load_diaz_inputs(
             econ_input_path,
@@ -1529,16 +1585,18 @@ def get_refA(
             econ_input_path,
             slr_input_path,
             params,
-            segs,
+            selectors={"seg": segs},
             surge_lookup_store=surge_input_path,
             mc_dim=mc_dim,
+            lsl_var=lsl_var,
+            slr_site_id_dim=slr_site_id_dim,
             include_cc=False,
             include_ncc=True,
+            scen_mc_filter=scen_mc_filter,
             storage_options=storage_options,
-            quantiles=quantiles,
+            quantiles=[quantile],
             **params.refA_scenario_selectors,
         )
-        slr = slr.unstack("scen_mc")
     slr = slr.squeeze(
         [d for d in slr.dims if len(slr[d]) == 1 and d != "seg"], drop=True
     )
@@ -1569,13 +1627,17 @@ def get_refA(
 
     lowest = npv.argmin("case").astype("uint8")
     refA = refA.isel(case=lowest)
+    refA = refA.to_dataset(name="refA").reset_coords(drop=True)
     refA["case"] = lowest
 
+    if output_path is not None:
+        refA.to_zarr(str(output_path), storage_options=storage_options, region="auto")
+        return None
     return refA
 
 
 def calc_all_cases(
-    seg_adms,
+    selectors,
     params,
     econ_input_path,
     slr_input_paths,
@@ -1585,8 +1647,11 @@ def calc_all_cases(
     surge_input_path=None,
     seg_var="seg_adm",
     mc_dim="quantile",
+    slr_site_id_dim="site_id",
+    lsl_var="lsl_msl05",
     quantiles=[0.5],
-    storage_options={},
+    scen_mc_filter=None,
+    storage_options=None,
     check=True,
     diaz_inputs=False,
     **model_kwargs,
@@ -1594,12 +1659,12 @@ def calc_all_cases(
     if check_finished_zarr_workflow(
         finalstore=output_path if check else None,
         varname="costs",
-        final_selector={seg_var: seg_adms, "case": CASES[:-1]},
+        final_selector={"case": CASES[:-1], **selectors},
         storage_options=storage_options,
     ):
         return None
 
-    segs = ["_".join(seg_adm.split("_")[:2]) for seg_adm in seg_adms]
+    segs = ["_".join(seg_adm.split("_")[:2]) for seg_adm in selectors[seg_var]]
 
     if diaz_inputs:
         inputs, slr = load_diaz_inputs(
@@ -1611,11 +1676,14 @@ def calc_all_cases(
             econ_input_path,
             slr_input_paths,
             params,
-            seg_adms,
+            selectors=selectors,
             slr_names=slr_names,
             seg_var=seg_var,
             surge_lookup_store=surge_input_path,
             mc_dim=mc_dim,
+            lsl_var=lsl_var,
+            slr_site_id_dim=slr_site_id_dim,
+            scen_mc_filter=scen_mc_filter,
             quantiles=quantiles,
             storage_options=storage_options,
         )
@@ -1630,7 +1698,7 @@ def calc_all_cases(
         .refA.sel(seg=segs)
         .drop_vars("case")
     )
-    refA["seg"] = seg_adms
+    refA["seg"] = selectors[seg_var]
     if "movefactor" in refA.dims:
         refA = refA.sel(movefactor=params.movefactor, drop=True)
 
@@ -1651,7 +1719,7 @@ def calc_all_cases(
         .sum("year")
     )
     if output_path is not None:
-        save_to_zarr_region(out, output_path, storage_options=storage_options)
+        out.to_zarr(str(output_path), storage_options=storage_options, region="auto")
         return None
     return out
 
@@ -1664,7 +1732,7 @@ def optimize_case(
     seg_var="seg_adm",
     check=True,
     eps=1,
-    storage_options={},
+    storage_options=None,
 ):
     # use last fpath to check if this task has already been run
     if check and check_finished_zarr_workflow(
@@ -1683,18 +1751,14 @@ def optimize_case(
 
     this_seg_adms = all_segs[seg_var].isel({seg_var: all_segs.seg == seg}).values
 
-    save_to_zarr_region(
-        select_optimal_case(
-            output_path,
-            seg_adm,
-            this_seg_adms,
-            eps=eps,
-            region_var=seg_var,
-            storage_options=storage_options,
-        ),
+    select_optimal_case(
         output_path,
+        seg_adm,
+        this_seg_adms,
+        eps=eps,
+        region_var=seg_var,
         storage_options=storage_options,
-    )
+    ).to_zarr(str(output_path), storage_options=storage_options, region="auto")
 
     return None
 
