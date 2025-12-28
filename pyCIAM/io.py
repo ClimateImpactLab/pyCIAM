@@ -255,6 +255,8 @@ def _load_lslr_for_ciam(
         )
 
     wcc = scen_mc_filter.get_level_values("scenario") != ncc_name
+
+    # it's possible that the scen_mc_filter only filters scenarios not monte carlos
     if mc_dim in scen_mc_filter.names:
         scen_mc_ncc = scen_mc_filter[~wcc].droplevel("scenario").values
     else:
