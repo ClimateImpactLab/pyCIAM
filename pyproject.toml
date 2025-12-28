@@ -20,9 +20,10 @@ maintainers = [{ name = "Ian Bolliger", email = "ian@reask.earth"}]
 dependencies = [
     "cloudpathlib",
     "gitpython",
-    "rhg_compute_tools",
+    "numpy >= 2",
     "parameterize_jobs",
     "pint-xarray",
+    "rhg_compute_tools",
     "scikit-learn",
     "xarray[accel,parallel]",
     "zarr"
