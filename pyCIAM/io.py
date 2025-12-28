@@ -276,11 +276,6 @@ def _load_lslr_for_ciam(
         )
     ).drop(["lat", "lon"], errors="ignore")
 
-    # convert to meters
-    for v in slr.data_vars:
-        if "units" in slr[v].attrs:
-            slr[v] = slr[v].pint.quantify().pint.to("meters").pint.dequantify()
-
     # select only the scenarios we wish to model
     if len(scen_mc_xr_wcc.scen_mc):
         slr_out = (
@@ -313,15 +308,19 @@ def _load_lslr_for_ciam(
             slr_ncc = slr_ncc.stack(scen_mc=stack_dims)
         else:
             slr_ncc = slr_ncc.rename({stack_dims[0]: "scen_mc"})
-        slr_out = xr.concat((slr_out, slr_ncc), dim="scen_mc").sel(
-            scen_mc=scen_mc_filter
-        )
+        slr_out = xr.concat(
+            (slr_out, slr_ncc), dim="scen_mc", combine_attrs="no_conflicts"
+        ).sel(scen_mc=scen_mc_filter)
 
     if quantiles is not None and mc_dim != "quantile":
         slr_out = slr_out.quantile(quantiles, dim=mc_dim)
         slr_out = slr_out.rename(scen_mc="scenario").stack(
             scen_mc=["scenario", "quantile"]
         )
+
+    # convert to meters
+    if "units" in slr_out.attrs:
+        slr_out = slr_out.pint.quantify().pint.to("meters").pint.dequantify()
 
     # add on base year where slr is 0
     slr_out = slr_out.reindex(
