@@ -204,7 +204,7 @@ def _load_scenario_mc(
     if quantiles is not None:
         if mc_dim == "quantile":
             scen_mc_filter = scen_mc_filter.sel(quantile=quantiles).sortby(
-                ["scenario", mc_dim]
+                ["scenario", "quantile"]
             )
         else:
             scen_mc_filter = scen_mc_filter.scenario.sortby("scenario")
