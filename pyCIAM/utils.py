@@ -64,10 +64,7 @@ def _get_lslr_plan_data(
         lslr_plan = lslr.sel(year=design_years).rename(year="at")
         lslr_plan["at"] = plan_years
     else:
-        # hack to handle newer xarray not being able to groupby with multiindex
-        lslr_plan = lslr.unstack().groupby(planning_periods).max().rename("lslr_plan")
-        if "scen_mc" in lslr.dims:
-            lslr_plan = lslr_plan.stack(scen_mc=lslr.xindexes["scen_mc"].index.names)
+        lslr_plan = lslr.groupby(planning_periods).max().rename("lslr_plan")
 
     # hack to reduce surge height by 50% for protect 10 as in Diaz2016
     if diaz_protect_height:
@@ -76,10 +73,9 @@ def _get_lslr_plan_data(
         )
     else:
         surge_heights_p = surge_heights
-
     surge_heights = xr.concat(
         (surge_heights, surge_heights_p),
-        dim=pd.Index(["retreat", "protect"], name="adapttype"),
+        dim=xr.DataArray(["retreat", "protect"], dims=["adapttype"]),
     )
 
     # calculate retreat and protect heights
@@ -187,6 +183,16 @@ def add_attrs_to_result(ds, seg_var, mc_dim=None):
                 "optimal adaptation pathway under a 'no-climate-change' scenario and "
                 "selecting the initial height. Retreat is assumed regardless of "
                 "whether optimal path is retreat or protect."
+            ),
+        },
+        "scen_mc": {
+            "long_name": "Scenario and Monte Carlo Sample Index",
+            "description": (
+                "If filtering to a subset of the full combination of SLR scenario and "
+                "Monte Carlo sample using `scen_mc_filter`, the result is no longer a "
+                "dense array across both 'scenario' and '`mc_sample_dim`. Instead, we "
+                "have a 1D list of scenario/mcID values that were run. This coordinate "
+                "contains that list."
             ),
         },
     }

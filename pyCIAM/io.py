@@ -253,6 +253,8 @@ def _load_lslr_for_ciam(
             quantiles=quantiles,
             ncc_name=ncc_name,
         )
+    elif isinstance(scen_mc_filter, pd.MultiIndex):
+        scen_mc_filter = scen_mc_filter.reorder_levels(("scenario", mc_dim))
 
     wcc = scen_mc_filter.get_level_values("scenario") != ncc_name
 
@@ -334,6 +336,14 @@ def _load_lslr_for_ciam(
     if interp_years is not None:
         slr_out = slr_out.interp(year=interp_years)
 
+    # use string concatenated variable instead of multiindex to facilitate zarr
+    # compression
+    if "scen_mc" in slr_out.coords and isinstance(
+        slr_out.indexes["scen_mc"], pd.MultiIndex
+    ):
+        slr_out = slr_out.reset_index("scen_mc").assign_coords(
+            scen_mc=slr_out.scenario.values + "_" + slr_out.sample.values.astype(str)
+        )
     return slr_out
 
 
@@ -658,7 +668,7 @@ def load_ciam_inputs(
             xr.open_zarr(
                 str(surge_lookup_store), chunks=None, storage_options=storage_options
             )
-            .sel({seg_var: selectors["seg"]})
+            .sel({seg_var: selectors[seg_var]})
             .load()
         )
         if seg_var != "seg":
@@ -667,7 +677,7 @@ def load_ciam_inputs(
         surge = None
 
     # get SLR
-    if not isinstance(slr_store, (list, np.ndarray, tuple, set)):
+    if not pd.api.types.is_list_like(slr_store):
         slr_store = [slr_store]
         ncc_names = ["ncc"]
     else:
