@@ -21,7 +21,6 @@ Public Functions:
 
 import dask.array as da
 import numpy as np
-import pandas as pd
 import xarray as xr
 from numpy.dtypes import StringDType
 
@@ -194,7 +193,8 @@ def _create_surge_lookup_skeleton_store(
     to_save = xr.DataArray(
         da.empty(
             (len(pc_in[seg_var]), n_interp_pts_lslr, n_interp_pts_rhdiff, 2, 2),
-            chunks=(seg_chunksize, -1, -1, -1, -1), dtype="float64"
+            chunks=(seg_chunksize, -1, -1, -1, -1),
+            dtype="float64",
         ),
         dims=[seg_var, "lslr", "rh_diff", "costtype", "adapttype"],
         coords={
@@ -374,7 +374,7 @@ def _save_storm_dam(
             ).to_array("costtype")
         )
     res = (
-        xr.concat(res, dim=pd.Index(["retreat", "protect"], name="adapttype"))
+        xr.concat(res, dim=xr.DataArray(["retreat", "protect"], dims=["adapttype"]))
         .reindex(costtype=["stormCapital", "stormPopulation"])
         .to_dataset(name="frac_losses")
     )
