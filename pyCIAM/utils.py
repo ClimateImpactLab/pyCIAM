@@ -64,10 +64,7 @@ def _get_lslr_plan_data(
         lslr_plan = lslr.sel(year=design_years).rename(year="at")
         lslr_plan["at"] = plan_years
     else:
-        # hack to handle newer xarray not being able to groupby with multiindex
-        lslr_plan = lslr.unstack().groupby(planning_periods).max().rename("lslr_plan")
-        if "scen_mc" in lslr.dims:
-            lslr_plan = lslr_plan.stack(scen_mc=lslr.xindexes["scen_mc"].index.names)
+        lslr_plan = lslr.groupby(planning_periods).max().rename("lslr_plan")
 
     # hack to reduce surge height by 50% for protect 10 as in Diaz2016
     if diaz_protect_height:
@@ -76,10 +73,9 @@ def _get_lslr_plan_data(
         )
     else:
         surge_heights_p = surge_heights
-
     surge_heights = xr.concat(
         (surge_heights, surge_heights_p),
-        dim=pd.Index(["retreat", "protect"], name="adapttype"),
+        dim=xr.DataArray(["retreat", "protect"], dims=["adapttype"]),
     )
 
     # calculate retreat and protect heights
@@ -116,7 +112,7 @@ def spherical_nearest_neighbor(df1, df2, x1="lon", y1="lat", x2="lon", y2="lat")
     return pd.Series(df2.index[ixs[:, 0]], index=df1.index)
 
 
-def add_attrs_to_result(ds):
+def add_attrs_to_result(ds, seg_var, mc_dim=None):
     attr_dict = {
         "case": {
             "long_name": "Adaptation Strategy",
@@ -180,11 +176,32 @@ def add_attrs_to_result(ds):
             "long_name": "Shared Socioeconomic Pathway",
             "description": "Socioeconomic growth model used",
         },
+        "refA": {
+            "long_name": "Initial adaptation height",
+            "description": (
+                "Initial retreat height assumed in model. Determined by choosing "
+                "optimal adaptation pathway under a 'no-climate-change' scenario and "
+                "selecting the initial height. Retreat is assumed regardless of "
+                "whether optimal path is retreat or protect."
+            ),
+        },
+        "scen_mc": {
+            "long_name": "Scenario and Monte Carlo Sample Index",
+            "description": (
+                "If filtering to a subset of the full combination of SLR scenario and "
+                "Monte Carlo sample using `scen_mc_filter`, the result is no longer a "
+                "dense array across both 'scenario' and '`mc_sample_dim`. Instead, we "
+                "have a 1D list of scenario/mcID values that were run. This coordinate "
+                "contains that list."
+            ),
+        },
     }
+    if mc_dim is not None:
+        attr_dict[mc_dim] = {"long_name": "Monte carlo sample index"}
     extra_vars = [
         v
         for v in ds.variables
-        if v not in ["year", "seg_adm", "npv"] + list(attr_dict.keys())
+        if v not in ["year", seg_var, "npv"] + list(attr_dict.keys())
     ]
     assert not len(extra_vars), f"Unexpected variables: {extra_vars}"
     for v in ds.variables:
@@ -193,13 +210,19 @@ def add_attrs_to_result(ds):
     return ds
 
 
+def _get_exp_year(da):
+    exp_year = [v for v in da.data_vars if v.startswith("pop_") and "scale" not in v]
+    assert len(exp_year) == 1, exp_year
+    return int(exp_year[0].split("_")[1])
+
+
 def collapse_econ_inputs_to_seg(
     econ_input_path,
     output_path,
     seg_var_subset=None,
     output_chunksize=100,
     seg_var="seg_adm",
-    storage_options={},
+    storage_options=None,
 ):
     sliiders = subset_econ_inputs(
         xr.open_zarr(
@@ -222,10 +245,15 @@ def collapse_econ_inputs_to_seg(
         sliiders.ypcc.sel(country="USA", drop=True).load().reset_coords(drop=True)
     )
 
+    # allow for different base years in K and pop spatial variables
+    exp_year = _get_exp_year(sliiders)
+    pop_var = f"pop_{exp_year}"
+    k_var = f"K_{exp_year}"
+
     out = (
-        sliiders[["K_2019", "pop_2019", "landarea", "length", "wetland"]]
+        sliiders[[k_var, pop_var, "landarea", "length", "wetland"]]
         .groupby(grouper)
-        .sum("seg_adm")
+        .sum(seg_var)
     )
 
     out[["surge_height", "gumbel_params", "seg_lon", "seg_lat"]] = (
@@ -246,16 +274,18 @@ def collapse_econ_inputs_to_seg(
     for v, w in [
         (
             "mobcapfrac",
-            sliiders.K_2019.sum("elev"),
+            sliiders[k_var].sum("elev"),
         ),
-        ("pop_scale", sliiders.pop_2019.sum("elev")),
-        ("K_scale", sliiders.K_2019.sum("elev")),
+        ("pop_scale", sliiders[pop_var].sum("elev")),
+        ("K_scale", sliiders[k_var].sum("elev")),
         ("interior", sliiders.landarea.sum("elev")),
         ("pc", sliiders.length),
-        ("ypcc", sliiders.pop_2019.sum("elev")),
+        ("ypcc", sliiders[pop_var].sum("elev")),
         ("wetlandservice", sliiders.wetland.sum("elev")),
+        ("vsl", sliiders[pop_var].sum("elev")),
     ]:
-        weighted_avg(v, w)
+        if v in sliiders.data_vars:
+            weighted_avg(v, w)
 
     out["rho"] = out.ypcc / (out.ypcc + usa_ypcc_ref.sel(year=2000, drop=True))
 

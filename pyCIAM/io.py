@@ -22,7 +22,7 @@ import xarray as xr
 from fsspec import FSTimeoutError
 from fsspec.implementations.zip import ZipFileSystem
 
-from pyCIAM.utils import copy
+from pyCIAM.utils import _get_exp_year, copy
 from pyCIAM.utils import spherical_nearest_neighbor as snn
 
 from .utils import _s2d
@@ -36,7 +36,7 @@ def prep_sliiders(
     selectors={},
     calc_popdens_with_wetland_area=True,
     expand_exposure=True,
-    storage_options={},
+    storage_options=None,
 ):
     """Import the SLIIDERS dataset (or a different dataset formatted analogously).
 
@@ -102,7 +102,10 @@ def prep_sliiders(
     """
     inputs_all = xr.open_zarr(
         str(input_store), chunks=None, storage_options=storage_options
-    ).sel(selectors, drop=True)
+    )
+    inputs_all = inputs_all.sel(
+        {k: v for k, v in selectors.items() if k in inputs_all.dims}, drop=True
+    )
 
     inputs = inputs_all.sel({seg_var: seg_vals})
     inputs = _s2d(inputs).assign(constants)
@@ -124,19 +127,16 @@ def prep_sliiders(
             * (inputs.ypcc / ref_income) ** inputs.vsl_inc_elast
         )
 
-    if expand_exposure and "pop" not in inputs.data_vars:
-        exp_year = [
-            v for v in inputs.data_vars if v.startswith("pop_") and "scale" not in v
-        ]
-        assert len(exp_year) == 1, exp_year
-        exp_year = exp_year[0].split("_")[1]
-        pop_var = "pop_" + exp_year
-        inputs["pop"] = inputs[pop_var] * inputs.pop_scale
-        inputs = inputs.drop(pop_var)
-    if expand_exposure and "K" not in inputs.data_vars:
-        K_var = "K_" + exp_year
-        inputs["K"] = inputs[K_var] * inputs.K_scale
-        inputs = inputs.drop(K_var)
+    if expand_exposure:
+        exp_year = _get_exp_year(inputs)
+        if "pop" not in inputs.data_vars:
+            pop_var = f"pop_{exp_year}"
+            inputs["pop"] = inputs[pop_var] * inputs.pop_scale
+            inputs = inputs.drop(pop_var)
+        if "K" not in inputs.data_vars:
+            K_var = f"K_{exp_year}"
+            inputs["K"] = inputs[K_var] * inputs.K_scale
+            inputs = inputs.drop(K_var)
     if "dfact" not in inputs.data_vars and "npv_start" in inputs.data_vars:
         inputs["dfact"] = (1 / (1 + inputs.dr)) ** (inputs.year - inputs.npv_start)
 
@@ -196,30 +196,28 @@ def _load_scenario_mc(
     include_cc=True,
     quantiles=None,
     ncc_name="ncc",
-    storage_options={},
+    storage_options=None,
 ):
     scen_mc_filter = xr.open_zarr(
         str(slr_store), chunks=None, storage_options=storage_options
     )[["scenario", mc_dim]]
     if quantiles is not None:
         if mc_dim == "quantile":
-            scen_mc_filter = scen_mc_filter.sel(quantile=quantiles)
+            scen_mc_filter = scen_mc_filter.sel(quantile=quantiles).sortby(
+                ["scenario", "quantile"]
+            )
         else:
-            scen_mc_filter = scen_mc_filter.quantile(quantiles, dim=mc_dim)
-
-    scen_mc_filter = (
-        scen_mc_filter.to_dataframe().sort_values(["scenario", mc_dim]).index
-    )
+            scen_mc_filter = scen_mc_filter.scenario.sortby("scenario")
+    scen_mc_filter = scen_mc_filter.to_dataframe().index
 
     if include_ncc:
-        scen_mc_filter = scen_mc_filter.append(
-            pd.MultiIndex.from_product(
-                (
-                    [ncc_name],
-                    scen_mc_filter.get_level_values(mc_dim).unique().sort_values(),
-                ),
-                names=["scenario", mc_dim],
-            )
+        scen_mc_filter = scen_mc_filter.union(
+            pd.DataFrame(index=scen_mc_filter)
+            .reset_index()
+            .assign(scenario=ncc_name)
+            .drop_duplicates()
+            .set_index(scen_mc_filter.names)
+            .index
         )
 
     if not include_cc:
@@ -239,9 +237,10 @@ def _load_lslr_for_ciam(
     mc_dim="mc_sample_id",
     lsl_var="lsl_msl05",
     lsl_ncc_var="lsl_ncc_msl05",
+    site_id_dim="site_id",
     ncc_name="ncc",
     slr_0_year=2005,
-    storage_options={},
+    storage_options=None,
     quantiles=None,
 ):
     if scen_mc_filter is None:
@@ -254,9 +253,16 @@ def _load_lslr_for_ciam(
             quantiles=quantiles,
             ncc_name=ncc_name,
         )
+    elif isinstance(scen_mc_filter, pd.MultiIndex):
+        scen_mc_filter = scen_mc_filter.reorder_levels(("scenario", mc_dim))
 
     wcc = scen_mc_filter.get_level_values("scenario") != ncc_name
-    scen_mc_ncc = scen_mc_filter[~wcc].droplevel("scenario").values
+
+    # it's possible that the scen_mc_filter only filters scenarios not monte carlos
+    if mc_dim in scen_mc_filter.names:
+        scen_mc_ncc = scen_mc_filter[~wcc].droplevel("scenario").values
+    else:
+        scen_mc_ncc = None
     scen_mc_xr_wcc = (
         scen_mc_filter[wcc]
         .to_frame()
@@ -269,45 +275,56 @@ def _load_lslr_for_ciam(
 
     # select the nearest SLR locations to the passed locations
     slr = _s2d(
-        slr.sel(site_id=get_nearest_slrs(slr, lonlats).to_xarray()).drop("site_id")
+        slr.sel({site_id_dim: get_nearest_slrs(slr, lonlats).to_xarray()}).drop(
+            site_id_dim
+        )
     ).drop(["lat", "lon"], errors="ignore")
 
     # select only the scenarios we wish to model
     if len(scen_mc_xr_wcc.scen_mc):
         slr_out = (
             slr[lsl_var]
-            .sel({"scenario": scen_mc_xr_wcc.scenario, mc_dim: scen_mc_xr_wcc[mc_dim]})
-            .set_index(scen_mc=["scenario", mc_dim])
+            .sel({k: scen_mc_xr_wcc[k] for k in scen_mc_xr_wcc.data_vars})
+            .set_index(scen_mc=list(scen_mc_xr_wcc.data_vars.keys()))
         )
     else:
         slr_out = xr.DataArray(
             [],
             dims=("scen_mc",),
             coords={
-                "scen_mc": pd.MultiIndex.from_tuples([], names=["scenario", mc_dim])
+                "scen_mc": pd.MultiIndex.from_tuples(
+                    [], names=list(scen_mc_xr_wcc.data_vars.keys())
+                )
+                if mc_dim in scen_mc_xr_wcc.data_vars
+                else pd.Index([], name="scen_mc")
             },
         )
 
-    if len(scen_mc_ncc):
-        slr_ncc = (
-            slr[lsl_ncc_var]
-            .sel({mc_dim: scen_mc_ncc})
-            .expand_dims(scenario=[ncc_name])
-            .stack(scen_mc=["scenario", mc_dim])
-        )
-        slr_out = xr.concat((slr_out, slr_ncc), dim="scen_mc").sel(
-            scen_mc=scen_mc_filter
+    if include_ncc:
+        slr_ncc = slr[lsl_ncc_var]
+        stack_dims = ["scenario"]
+        if scen_mc_ncc is not None:
+            slr_ncc = slr_ncc.sel({mc_dim: scen_mc_ncc})
+            stack_dims.append(mc_dim)
+
+        slr_ncc = slr_ncc.expand_dims(scenario=[ncc_name])
+        if len(stack_dims) > 1:
+            slr_ncc = slr_ncc.stack(scen_mc=stack_dims)
+        else:
+            slr_ncc = slr_ncc.rename({stack_dims[0]: "scen_mc"})
+        slr_out = xr.concat(
+            (slr_out, slr_ncc), dim="scen_mc", combine_attrs="no_conflicts"
+        ).sel(scen_mc=scen_mc_filter)
+
+    if quantiles is not None and mc_dim != "quantile":
+        slr_out = slr_out.quantile(quantiles, dim=mc_dim)
+        slr_out = slr_out.rename(scen_mc="scenario").stack(
+            scen_mc=["scenario", "quantile"]
         )
 
+    # convert to meters
     if "units" in slr_out.attrs:
-        ix_names = slr_out.indexes["scen_mc"].names
-        # hack to avoid pint destroying multi-indexed coords
-        slr_out = (
-            slr_out.pint.quantify()
-            .pint.to("meters")
-            .pint.dequantify()
-            .set_index(scen_mc=ix_names)
-        )
+        slr_out = slr_out.pint.quantify().pint.to("meters").pint.dequantify()
 
     # add on base year where slr is 0
     slr_out = slr_out.reindex(
@@ -319,6 +336,16 @@ def _load_lslr_for_ciam(
     if interp_years is not None:
         slr_out = slr_out.interp(year=interp_years)
 
+    # use string concatenated variable instead of multiindex to facilitate zarr
+    # compression
+    if "scen_mc" in slr_out.coords and isinstance(
+        slr_out.indexes["scen_mc"], pd.MultiIndex
+    ):
+        slr_out = slr_out.reset_index("scen_mc").assign_coords(
+            scen_mc=slr_out.scenario.values
+            + "_"
+            + slr_out[mc_dim if quantiles is None else "quantile"].values.astype(str)
+        )
     return slr_out
 
 
@@ -350,14 +377,19 @@ def create_template_dataarray(dims, coords, chunks, dtype="float32", name=None):
         An empty dask-backed DataArray.
     """
     lens = {k: len(v) for k, v in coords.items()}
-    return xr.DataArray(
-        da.empty(
-            [lens[k] for k in dims], chunks=[chunks[k] for k in dims], dtype=dtype
-        ),
+    out = xr.DataArray(
+        da.empty([lens[k] for k in dims], chunks=[-1] * len(dims), dtype=dtype),
         dims=dims,
         coords={k: v for k, v in coords.items() if k in dims},
         name=name,
     )
+    out.encoding["chunks"] = [chunks[k] for k in dims]
+    if np.issubdtype(np.dtype(dtype), np.integer):
+        fill_value = np.iinfo(dtype).max
+    else:
+        fill_value = "NaN"
+    out.encoding["fill_value"] = fill_value
+    return out
 
 
 def create_template_dataset(var_dims, coords, chunks, dtypes):
@@ -403,7 +435,7 @@ def check_finished_zarr_workflow(
     varname=None,
     final_selector={},
     mask=None,
-    storage_options={},
+    storage_options=None,
 ):
     """Check if a workflow that writes to a particular region of a zarr store has
     already run. This is useful when running pyCIAM in "probabilistic" mode across a
@@ -487,80 +519,6 @@ def check_finished_zarr_workflow(
     return finished
 
 
-def save_to_zarr_region(ds_in, store, already_aligned=False, storage_options={}):
-    """Wrapper around :py:method:`xarray.Dataset.to_zarr` when specifying the `region`
-    kwarg. This function allows you to avoid boilerplate to figure out the integer slice
-    objects needed to pass as `region` when calling `:py:meth:xarray.Dataset.to_zarr`.
-
-    Parameters
-    ----------
-    ds_in : :py:class:`xarray.Dataset` or :py:class:`xarray.DataArray`
-        Dataset or DataArray to save to a specific region of a Zarr store
-    store : Path-like
-        Path to Zarr store
-    already_aligned : bool, default False
-        If True, assume that the coordinates of `ds_in` are already ordered the same
-        way as those of `store`. May save some computation, but will miss-attribute
-        values to coordinates if set to True when coords are not aligned.
-    storage_options : dict, optional
-        Passed to :py:function:`xarray.open_zarr`
-
-    Returns
-    -------
-    None :
-        No return value but `ds_in` is saved to the appropriate region of `store`.
-
-    Raises
-    ------
-        ValueError
-            If `ds_in` is an unnamed DataArray and `store` has more than one variable.
-        AssertionError
-            If any coordinate values of `ds_in` are not contiguous within `store`.
-    """
-    ds_out = xr.open_zarr(str(store), chunks=None, storage_options=storage_options)
-
-    # convert dataarray to dataset if needed
-    if isinstance(ds_in, xr.DataArray):
-        if ds_in.name is not None:
-            ds_in = ds_in.to_dataset()
-        else:
-            if len(ds_out.data_vars) != 1:
-                raise ValueError(
-                    "``ds_in`` is an unnamed DataArray and ``store`` has more than one "
-                    "variable."
-                )
-            ds_in = ds_in.to_dataset(name=list(ds_out.data_vars)[0])
-
-    # align
-    for v in ds_in.data_vars:
-        ds_in[v] = ds_in[v].transpose(*ds_out[v].dims).astype(ds_out[v].dtype)
-
-    # find appropriate regions
-    alignment_dims = {}
-    regions = {}
-    for r in ds_in.dims:
-        if len(ds_in[r]) == len(ds_out[r]):
-            alignment_dims[r] = ds_out[r].values
-            continue
-        alignment_dims[r] = [v for v in ds_out[r].values if v in ds_in[r].values]
-        valid_ixs = np.arange(len(ds_out[r]))[ds_out[r].isin(alignment_dims[r]).values]
-        n_valid = len(valid_ixs)
-        st = valid_ixs[0]
-        end = valid_ixs[-1]
-        assert end - st == n_valid - 1, (
-            f"Indices are not continuous along dimension {r}"
-        )
-        regions[r] = slice(st, end + 1)
-
-    # align coords
-    if not already_aligned:
-        ds_in = ds_in.sel(alignment_dims)
-
-    ds_in.drop_vars(ds_in.coords).to_zarr(
-        str(store), region=regions, storage_options=storage_options
-    )
-
-
 def get_nearest_slrs(slr_ds, lonlats, x1="seg_lon", y1="seg_lat"):
     unique_lonlats = lonlats[[x1, y1]].drop_duplicates()
     slr_lonlat = slr_ds[["lon", "lat"]].to_dataframe()
@@ -585,9 +543,11 @@ def load_ciam_inputs(
     input_store,
     slr_store,
     params,
-    seg_vals,
+    selectors={},
     slr_names=None,
     seg_var="seg",
+    lsl_var="lsl_msl05",
+    slr_site_id_dim="site_id",
     surge_lookup_store=None,
     ssp=None,
     iam=None,
@@ -596,7 +556,7 @@ def load_ciam_inputs(
     include_cc=True,
     mc_dim="mc_sample_id",
     quantiles=None,
-    storage_options={},
+    storage_options=None,
 ):
     """Load, process, and format all inputs needed to run pyCIAM.
 
@@ -611,9 +571,8 @@ def load_ciam_inputs(
     params : dict
         Dictionary of model parameters, typically loaded from a JSON file. See
         :file:`../params.json` for an example of the required parameters.
-    seg_vals : list of str
-        Defines the subset of regions (along dimension `seg_var`) that the function
-        will prep. Subsets are used to run CIAM in parallel.
+    selectors : list of str
+        Defines the subset of regions (along dimension `seg_var`) and/or scenario that the function will prep. Subsets are used to run CIAM in parallel.
     slr_names : list of str, optional
         If `slr_store` is a list of multiple SLR datasets, this must be a list of the
         same length providing names for each SLR dataset. This is used as a suffix for
@@ -623,6 +582,10 @@ def load_ciam_inputs(
     seg_var : str, default "seg_var"
         The name of the dimension in `input_store` along which the function will
         subset using `seg_vals`
+    lsl_var : str, default "lsl_msl05"
+        The name of the variable in ``slr_store`` containing local SLR values
+    slr_site_id_dim : str, default "site_id"
+        The name of the location dimension in ``slr_store``.
     surge_lookup_store : Path-like, optional
         If not None, will also load and process data from an ESL impacts lookup table
         (see `lookup.create_surge_lookup`). If included in a call to
@@ -681,14 +644,14 @@ def load_ciam_inputs(
         If `ssp` or `iam` is specified and the corresponding variables are not
         present in the Zarr store located at `input_store`.
     """
-    selectors = {"year": slice(params.model_start, None)}
+    selectors = {"year": slice(params.model_start, None), **selectors}
     if ssp is not None:
         selectors["ssp"] = ssp
     if iam is not None:
         selectors["iam"] = iam
     inputs = prep_sliiders(
         input_store,
-        seg_vals,
+        selectors[seg_var],
         # dropping the "refA_scenario_selectors" b/c this doesn't need to be added to
         # the input dataset object
         constants=params[params.map(type) != dict].to_dict(),  # noqa: E721
@@ -707,7 +670,7 @@ def load_ciam_inputs(
             xr.open_zarr(
                 str(surge_lookup_store), chunks=None, storage_options=storage_options
             )
-            .sel({seg_var: seg_vals})
+            .sel({seg_var: selectors[seg_var]})
             .load()
         )
         if seg_var != "seg":
@@ -716,7 +679,7 @@ def load_ciam_inputs(
         surge = None
 
     # get SLR
-    if not isinstance(slr_store, (list, np.ndarray, tuple, set)):
+    if not pd.api.types.is_list_like(slr_store):
         slr_store = [slr_store]
         ncc_names = ["ncc"]
     else:
@@ -733,8 +696,10 @@ def load_ciam_inputs(
                 include_ncc=include_ncc,
                 include_cc=include_cc,
                 ncc_name=ncc_names[sx],
+                lsl_var=lsl_var,
                 mc_dim=mc_dim,
                 quantiles=quantiles,
+                site_id_dim=slr_site_id_dim,
                 storage_options=storage_options,
             )
             for sx, s in enumerate(slr_store)
@@ -742,11 +707,18 @@ def load_ciam_inputs(
         dim="scen_mc",
     )
 
+    slr = slr.sel({k: v for k, v in selectors.items() if k in slr.dims})
+
     return inputs, slr, surge
 
 
 def load_diaz_inputs(
-    input_store, seg_vals, params, include_ncc=True, include_cc=True, storage_options={}
+    input_store,
+    seg_vals,
+    params,
+    include_ncc=True,
+    include_cc=True,
+    storage_options=None,
 ):
     """Load the original inputs used in Diaz 2016.
 

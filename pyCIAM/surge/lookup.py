@@ -21,10 +21,13 @@ Public Functions:
 
 import dask.array as da
 import numpy as np
-import pandas as pd
 import xarray as xr
+from numpy.dtypes import StringDType
 
-from pyCIAM.io import _load_lslr_for_ciam, save_to_zarr_region
+from pyCIAM.io import (
+    _load_lslr_for_ciam,
+    check_finished_zarr_workflow,
+)
 from pyCIAM.surge._calc import (
     _calc_storm_damages_no_resilience,
     _get_surge_heights_probs,
@@ -61,7 +64,9 @@ def _get_lslr_rhdiff_range(
     include_ncc=True,
     slr_0_years=2005,
     mc_dim="mc_sample_id",
-    storage_options={},
+    site_id_dim="site_id",
+    lsl_var="lsl_msl05",
+    storage_options=None,
 ):
     """Get range of lslr and rhdiff that we need to model to cover the full range.
 
@@ -78,7 +83,7 @@ def _get_lslr_rhdiff_range(
     pc_in = _s2d(
         xr.open_zarr(
             str(sliiders_store), chunks=None, storage_options=storage_options
-        ).sel({seg_var: seg_vals})
+        ).sel({seg_var: seg_vals, "year": slice(min(slr_0_years), None)})
     )
 
     if interp_years is None:
@@ -100,9 +105,11 @@ def _get_lslr_rhdiff_range(
             include_cc=include_cc,
             include_ncc=include_ncc,
             mc_dim=mc_dim,
+            lsl_var=lsl_var,
             slr_0_year=slr_0_years[sx],
             storage_options=storage_options,
-            quantiles=quantiles,
+            site_id_dim=site_id_dim,
+            quantiles=[0, 1] if mc_dim != "quantile" else quantiles,
         )
 
         # get the max LSLR experienced
@@ -175,7 +182,7 @@ def _create_surge_lookup_skeleton_store(
     seg_var="seg",
     seg_var_subset=None,
     force_overwrite=True,
-    storage_options={},
+    storage_options=None,
 ):
     pc_in = subset_econ_inputs(
         xr.open_zarr(str(sliiders_store), storage_options=storage_options),
@@ -187,14 +194,17 @@ def _create_surge_lookup_skeleton_store(
         da.empty(
             (len(pc_in[seg_var]), n_interp_pts_lslr, n_interp_pts_rhdiff, 2, 2),
             chunks=(seg_chunksize, -1, -1, -1, -1),
+            dtype="float64",
         ),
         dims=[seg_var, "lslr", "rh_diff", "costtype", "adapttype"],
         coords={
             seg_var: pc_in[seg_var].values,
             "lslr": np.arange(n_interp_pts_lslr),
             "rh_diff": np.arange(n_interp_pts_rhdiff),
-            "adapttype": ["retreat", "protect"],
-            "costtype": ["stormCapital", "stormPopulation"],
+            "adapttype": np.array(["retreat", "protect"], dtype=StringDType),
+            "costtype": np.array(
+                ["stormCapital", "stormPopulation"], dtype=StringDType
+            ),
         },
     ).to_dataset(name="frac_losses")
     to_save["rh_diff_by_seg"] = (
@@ -228,6 +238,7 @@ def _create_surge_lookup_skeleton_store(
 def _save_storm_dam(
     seg_vals,
     seg_var="seg",
+    lsl_var="lsl_msl05",
     sliiders_store=None,
     slr_stores=None,
     surge_lookup_store=None,
@@ -239,11 +250,21 @@ def _save_storm_dam(
     quantiles=None,
     scen_mc_filter=None,
     mc_dim="mc_sample_id",
+    slr_site_id_dim="site_id",
     start_year=None,
     slr_0_years=2005,
-    storage_options={},
+    overwrite=False,
+    storage_options=None,
 ):
     """Map over each chunk to run through damage calcs."""
+
+    if not overwrite and check_finished_zarr_workflow(
+        surge_lookup_store,
+        varname="frac_losses",
+        final_selector={seg_var: seg_vals},
+        storage_options=storage_options,
+    ):
+        return None
     diff_ranges = _get_lslr_rhdiff_range(
         sliiders_store,
         slr_stores,
@@ -255,6 +276,8 @@ def _save_storm_dam(
         quantiles=quantiles,
         scen_mc_filter=scen_mc_filter,
         mc_dim=mc_dim,
+        lsl_var=lsl_var,
+        site_id_dim=slr_site_id_dim,
         slr_0_years=slr_0_years,
         storage_options=storage_options,
     )
@@ -268,18 +291,26 @@ def _save_storm_dam(
         # these must be unique otherwise interp function will raise error
         template["lslr_by_seg"] = (
             (seg_var, "lslr"),
-            np.tile(np.arange(len(template.lslr))[np.newaxis, :], (len(seg_vals), 1)),
+            np.tile(
+                np.arange(len(template.lslr), dtype=template.lslr_by_seg.dtype)[
+                    np.newaxis, :
+                ],
+                (len(seg_vals), 1),
+            ),
         )
         template["rh_diff_by_seg"] = (
             (seg_var, "rh_diff"),
             np.tile(
-                np.arange(len(template.rh_diff))[np.newaxis, :], (len(seg_vals), 1)
+                np.arange(len(template.rh_diff), dtype=template.rh_diff_by_seg.dtype)[
+                    np.newaxis, :
+                ],
+                (len(seg_vals), 1),
             ),
         )
         if surge_lookup_store is None:
             return template
-        save_to_zarr_region(
-            template, surge_lookup_store, storage_options=storage_options
+        template.to_zarr(
+            str(surge_lookup_store), storage_options=storage_options, region="auto"
         )
         return None
 
@@ -343,7 +374,7 @@ def _save_storm_dam(
             ).to_array("costtype")
         )
     res = (
-        xr.concat(res, dim=pd.Index(["retreat", "protect"], name="adapttype"))
+        xr.concat(res, dim=xr.DataArray(["retreat", "protect"], dims=["adapttype"]))
         .reindex(costtype=["stormCapital", "stormPopulation"])
         .to_dataset(name="frac_losses")
     )
@@ -354,7 +385,7 @@ def _save_storm_dam(
         return res
 
     # identify which index to save to in template zarr
-    save_to_zarr_region(res, surge_lookup_store, storage_options=storage_options)
+    res.to_zarr(str(surge_lookup_store), storage_options=storage_options, region="auto")
 
 
 def create_surge_lookup(
@@ -374,10 +405,12 @@ def create_surge_lookup(
     scen_mc_filter=None,
     quantiles=None,
     mc_dim="mc_sample_id",
+    slr_site_id_dim="site_id",
+    lsl_var="lsl_msl05",
     force_overwrite=False,
     client=None,
     client_kwargs={},
-    storage_options={},
+    storage_options=None,
 ):
     """Create storm surge lookup table.
 
@@ -405,6 +438,10 @@ def create_surge_lookup(
         equivalent to segments. The reason you may wish to have nested regions is to
         be able to aggregate impacts to a different regions than those that are defined
         by the segments.
+    lsl_var : str, default "lsl_msl05"
+        The name of the variable in ``slr_stores`` containing local SLR values
+    slr_site_id_dim : str, default "site_id"
+        The name of the location dimension in ``slr_stores``.
     at_start : list of int
         A list specifying the starting years of each adpatation period. In pyCIAM, each
         segment chooses a new retreat or protection height at the start of each of these
@@ -492,6 +529,8 @@ def create_surge_lookup(
             n_interp_pts_lslr=n_interp_pts_lslr,
             n_interp_pts_rhdiff=n_interp_pts_rhdiff,
             mc_dim=mc_dim,
+            lsl_var=lsl_var,
+            slr_site_id_dim=slr_site_id_dim,
             ddf_i=ddf_i,
             dmf_i=dmf_i,
             quantiles=quantiles,
@@ -499,6 +538,7 @@ def create_surge_lookup(
             start_year=start_year,
             slr_0_years=slr_0_years,
             storage_options=storage_options,
+            overwrite=force_overwrite,
             **client_kwargs,
         )
     )
