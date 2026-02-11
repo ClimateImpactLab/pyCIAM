@@ -342,7 +342,9 @@ def _load_lslr_for_ciam(
         slr_out.indexes["scen_mc"], pd.MultiIndex
     ):
         slr_out = slr_out.reset_index("scen_mc").assign_coords(
-            scen_mc=slr_out.scenario.values + "_" + slr_out.sample.values.astype(str)
+            scen_mc=slr_out.scenario.values
+            + "_"
+            + slr_out[mc_dim if quantiles is None else "quantile"].values.astype(str)
         )
     return slr_out
 
@@ -704,8 +706,6 @@ def load_ciam_inputs(
         ],
         dim="scen_mc",
     )
-    if scen_mc_filter is None:
-        slr = slr.unstack("scen_mc")
 
     slr = slr.sel({k: v for k, v in selectors.items() if k in slr.dims})
 

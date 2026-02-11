@@ -953,6 +953,384 @@ def select_optimal_case(
     return out
 
 
+def _get_selectors(
+    ciam_in, seg_adm_var, seg_chunksize, other_chunksizes, out_ds, client_batchsize
+):
+    seg_vars = ciam_in[seg_adm_var].values
+    seg_groups = [
+        slice(seg_vars[i], seg_vars[min(i + seg_chunksize - 1, len(seg_vars) - 1)])
+        for i in range(0, len(seg_vars), seg_chunksize)
+    ]
+
+    # add on groupings by any other dimensions than seg_var
+    names = [seg_adm_var]
+    ixs = [seg_groups]
+    for c, s in other_chunksizes.items():
+        this_dim = out_ds[c].values
+        ixs.append(
+            [
+                slice(this_dim[i], this_dim[min(i + s - 1, len(this_dim) - 1)])
+                for i in range(0, len(this_dim), s)
+            ]
+        )
+        names.append(c)
+    master_ix = pd.MultiIndex.from_product(ixs, names=names)
+    dimnames = master_ix.names
+    dimnum = range(len(dimnames))
+    selectors = master_ix.map(lambda x: {dimnames[k]: x[k] for k in dimnum}).values
+
+    # compute in batches so that dask scheduler doesn't get overwhelmed with 1M+ tasks
+    # in case of large workflow
+    n_batches = ceil(len(selectors) / client_batchsize)
+    selector_groups = np.array_split(selectors, n_batches)
+    ix_groups = np.array_split(master_ix, n_batches)
+
+    return selector_groups, ix_groups
+
+
+def _check_finished(
+    other_selectors, output_path, case_selector=CASES[:-1], storage_options=None
+):
+    return check_finished_zarr_workflow(
+        finalstore=output_path,
+        varname="costs",
+        final_selector={"case": case_selector, **other_selectors},
+        storage_options=storage_options,
+    )
+
+
+def _check_finished_full_chunk(
+    selector_group,
+    output_path,
+    client,
+    case_selector=CASES[:-1],
+    storage_options=None,
+):
+    kwargs = dict(
+        output_path=output_path,
+        case_selector=case_selector,
+        storage_options=storage_options,
+    )
+    is_finished = pd.Series(
+        selector_group,
+        index=client.map(_check_finished, selector_group, **kwargs),
+        name="selectors",
+    )
+    to_run = []
+
+    while len(is_finished):
+        sleep(5)
+        status = np.array([fut.status for fut in is_finished.index])
+        all_futs = is_finished.index[status == "finished"]
+        cancelled = is_finished[~np.isin(status, ["finished", "pending", "processing"])]
+        if len(cancelled):
+            bad_spec = cancelled.tolist()
+            new_futs = client.map(_check_finished, bad_spec, **kwargs)
+            is_finished = pd.concat(
+                (
+                    is_finished.drop(cancelled.index),
+                    pd.Series(
+                        bad_spec,
+                        index=pd.Index(new_futs, name=is_finished.index.name),
+                        name=is_finished.name,
+                    ),
+                )
+            )
+        if not len(all_futs):
+            continue
+        try:
+            finished = client.gather(all_futs.tolist())
+        except FutureCancelledError:
+            continue
+
+        unfinished = ~np.array(finished)
+        if unfinished.sum():
+            unfinished_futs = all_futs[unfinished]
+            to_run += is_finished.loc[unfinished_futs].tolist()
+            del unfinished_futs
+
+        is_finished = is_finished.drop(all_futs)
+        del all_futs
+    return to_run
+
+
+def _check_completed_fut_batch(batch, futs_ser, client, retry_func, **retry_kwargs):
+    status = np.array([fut.status for fut in batch])
+    errored = status == "error"
+    cancelled = status == "cancelled"
+    arr_batch = np.array(batch)
+    if sum(errored):
+        bad_futs = arr_batch[errored]
+        bad_spec = futs_ser.loc[bad_futs]
+        try:
+            bad_futs[0].result()
+        except Exception:
+            warnings.warn(f"Error in spec: {bad_spec}")
+            raise
+    if sum(cancelled):
+        bad_futs = arr_batch[cancelled]
+        bad_spec = futs_ser.loc[bad_futs].tolist()
+        new_futs = client.map(retry_func, bad_spec, **retry_kwargs)
+        futs_ser = pd.concat(
+            (
+                futs_ser.drop(bad_futs),
+                pd.Series(
+                    bad_spec,
+                    index=pd.Index(new_futs, name=futs_ser.index.name),
+                    name=futs_ser.name,
+                ),
+            )
+        )
+        batch = arr_batch[~cancelled]
+    return futs_ser.drop(batch)
+
+
+def _aggregate_costs_to_adm(
+    adms,
+    adm_groups,
+    adm_var,
+    seg_adm_var,
+    mc_dim,
+    output_path,
+    tmp_output_path,
+    postprocess,
+    storage_options=None,
+):
+    if check_finished_zarr_workflow(
+        finalstore=output_path,
+        varname="costs",
+        final_selector={adm_var: adms},
+        storage_options=storage_options,
+    ):
+        return None
+    out = []
+    all_adm_groups = np.concatenate(adm_groups.loc[adms].values)
+    dims = xr.open_zarr(str(tmp_output_path), chunks=None).dims
+    full_input = postprocess(
+        xr.open_zarr(
+            str(tmp_output_path),
+            chunks={
+                d: -1
+                for d in dims
+                if d not in [seg_adm_var, "scenario", mc_dim, "scen_mc"]
+            },
+        ).sel({seg_adm_var: all_adm_groups})
+    )
+    # aggregating costs and npv, accounting for whether postprocess func dropped either
+    full_input = full_input[[c for c in ["costs", "npv"] if c in full_input.data_vars]]
+    for adm in adms:
+        this_out = full_input.sel({seg_adm_var: adm_groups.loc[adm]})
+        ix_start = np.concatenate([[0], np.cumsum(this_out.chunksizes[seg_adm_var])])
+        this_sum = 0
+        with dask.config.set(scheduler="single-threaded"):
+            for ix in range(len(ix_start) - 1):
+                this_sum += (
+                    this_out.isel(
+                        {seg_adm_var: slice(ix_start[ix], ix_start[ix + 1])}, drop=True
+                    )
+                    .load()
+                    .sum(seg_adm_var)
+                )
+        out.append(this_sum)
+    out = xr.concat(out, dim=xr.DataArray(adms, dims=[adm_var])).drop_encoding()
+    if out.to_array().isnull().any():
+        raise ValueError("Null values found.")
+    out.drop_encoding().to_zarr(str(output_path), region="auto")
+
+
+def _aggregate_optimal_case_to_seg(
+    segs,
+    seg_map,
+    seg_adm_var,
+    output_path,
+    tmp_output_path,
+    postprocess,
+    storage_options=None,
+):
+    if check_finished_zarr_workflow(
+        finalstore=output_path,
+        varname="optimal_case",
+        final_selector={"seg": segs},
+        storage_options=storage_options,
+    ):
+        return None
+    all_seg_adms = seg_map.sel(seg=segs)
+    dims = xr.open_zarr(str(tmp_output_path), chunks=None).dims
+    out = postprocess(
+        xr.open_zarr(
+            str(tmp_output_path), chunks={d: -1 for d in dims if d != seg_adm_var}
+        )
+        .sel({seg_adm_var: all_seg_adms})
+        .drop_vars(seg_adm_var)
+    )[["optimal_case"]]
+    with dask.config.set(scheduler="single-threaded"):
+        out = out.load()
+    if out.to_array().isnull().any():
+        raise ValueError("Null values found.")
+    out.drop_encoding().to_zarr(str(output_path), region="auto")
+
+
+def _get_adm_groups(econ_input_path, adm_var, seg_adm_var, adms_unique):
+    return (
+        xr.open_zarr(str(econ_input_path), chunks=None)[adm_var]
+        .to_series()
+        .reset_index()
+        .set_index(adm_var)[seg_adm_var]
+        .groupby(adm_var)
+        .apply(list)
+        .loc[adms_unique]
+    )
+
+
+def _get_seg_map(econ_input_path, seg_adm_var, segs_unique):
+    return (
+        xr.open_zarr(str(econ_input_path), chunks=None)
+        .seg.to_series()
+        .reset_index()
+        .set_index("seg")[seg_adm_var]
+        .groupby("seg")
+        .first()
+        .loc[segs_unique]
+        .to_xarray()
+    )
+
+
+def _aggregate_results(
+    tmppath,
+    outpath,
+    econ_input_path,
+    seg_var,
+    adm_var,
+    mc_dim,
+    client,
+    postprocess_func=None,
+    scen_mc_filter=None,
+    overwrite=False,
+    storage_options=None,
+):
+    def postprocess(ds):
+        if postprocess_func is None:
+            return ds
+        return postprocess_func(ds)
+
+    # final output will be aggregated across segments within each adm region. We first
+    # create the appropriate template for a single IR and then later expand dims
+    template = postprocess(
+        xr.open_zarr(str(tmppath)).isel({seg_var: 0}, drop=True)
+    ).chunk(-1)
+
+    # want chunks to be roughly 100MB in size
+    adm_chunksize = ceil(100 / (template.costs.nbytes / 2**20))
+    seg_chunksize = ceil(100 / (template.optimal_case.nbytes / 2**20))
+
+    # get unique adms in same order as they appear in seg_ir
+    with xr.open_zarr(str(econ_input_path), chunks=None) as ciam_in:
+        adms = ciam_in[adm_var].load()
+        segs = ciam_in.seg.load()
+    adms_unique = adms.values[np.sort(np.unique(adms, return_index=True)[1])]
+    segs_unique = segs.values[np.sort(np.unique(segs, return_index=True)[1])]
+
+    # expand dims across adm regions and segs
+    for varname in ["costs", "npv"]:
+        if varname in template.data_vars:
+            template[varname] = (
+                template[varname]
+                .expand_dims({adm_var: adms_unique})
+                .chunk({adm_var: adm_chunksize})
+            )
+    template["optimal_case"] = template.optimal_case.expand_dims(seg=segs_unique).chunk(
+        {"seg": seg_chunksize}
+    )
+
+    # provide scenario and sample coords if needed
+    if "scen_mc" in template.dims:
+        template = template.assign_coords(
+            scenario=("scen_mc", scen_mc_filter.get_level_values("scenario")),
+            sample=("scen_mc", scen_mc_filter.get_level_values("sample")),
+        )
+
+    # clean up before saving
+    template = template.unify_chunks().drop_encoding()
+
+    # save
+    if overwrite or not outpath.exists():
+        template.to_zarr(str(outpath), mode="w", compute=False)
+
+    adm_groups = np.array_split(adms_unique, ceil(len(adms_unique) / adm_chunksize))
+    seg_groups = np.array_split(segs_unique, ceil(len(segs_unique) / seg_chunksize))
+    seg_fut = client.submit(
+        _get_seg_map,
+        econ_input_path=econ_input_path,
+        seg_adm_var=seg_var,
+        segs_unique=segs_unique,
+    )
+    adm_fut = client.submit(
+        _get_adm_groups,
+        econ_input_path=econ_input_path,
+        adm_var=adm_var,
+        seg_adm_var=seg_var,
+        adms_unique=adms_unique,
+    )
+
+    def this_aggregate_costs(adm_group, adm_groups_all):
+        return _aggregate_costs_to_adm(
+            adm_group,
+            adm_groups=adm_groups_all,
+            adm_var=adm_var,
+            seg_adm_var=seg_var,
+            mc_dim=mc_dim,
+            output_path=outpath,
+            tmp_output_path=tmppath,
+            postprocess=postprocess,
+            storage_options=storage_options,
+        )
+
+    final_futs = pd.Series(
+        adm_groups,
+        index=client.map(this_aggregate_costs, adm_groups, adm_groups_all=adm_fut),
+    )
+    for batch in as_completed(final_futs.index.tolist()).batches():
+        final_futs = _check_completed_fut_batch(
+            batch, final_futs, client, this_aggregate_costs, adm_groups_all=adm_fut
+        )
+        del batch
+        if not len(final_futs):
+            break
+        sleep(10)
+
+    def this_aggregate_optimal_case(seg_group, seg_map):
+        return _aggregate_optimal_case_to_seg(
+            seg_group,
+            seg_map=seg_map,
+            seg_adm_var=seg_var,
+            output_path=outpath,
+            tmp_output_path=tmppath,
+            postprocess=postprocess,
+            storage_options=storage_options,
+        )
+
+    final_futs = pd.concat(
+        (
+            final_futs,
+            pd.Series(
+                seg_groups,
+                index=client.map(
+                    this_aggregate_optimal_case, seg_groups, seg_map=seg_fut
+                ),
+            ),
+        )
+    )
+
+    for batch in as_completed(final_futs.index.tolist()).batches():
+        final_futs = _check_completed_fut_batch(
+            batch, final_futs, client, this_aggregate_optimal_case, seg_map=seg_fut
+        )
+        del batch
+        if not len(final_futs):
+            break
+        sleep(10)
+
+
 def execute_pyciam(
     params_path,
     econ_input_path,
@@ -1416,368 +1794,163 @@ def execute_pyciam(
     ###############################
     # get groups for running pyCIAM
     ###############################
-    seg_vars = ciam_in[seg_var].values
-    seg_groups = [
-        slice(
-            seg_vars[i], seg_vars[min(i + pyciam_seg_chunksize - 1, len(seg_vars) - 1)]
-        )
-        for i in range(0, len(seg_vars), pyciam_seg_chunksize)
-    ]
-
-    # add on groupings by any other dimensions than seg_var
-    names = [seg_var]
-    ixs = [seg_groups]
-    for c, s in other_chunksizes.items():
-        this_dim = out_ds[c].values
-        ixs.append(
-            [
-                slice(this_dim[i], this_dim[min(i + s - 1, len(this_dim) - 1)])
-                for i in range(0, len(this_dim), s)
-            ]
-        )
-        names.append(c)
-    master_ix = pd.MultiIndex.from_product(ixs, names=names)
-    dimnames = master_ix.names
-    dimnum = range(len(dimnames))
-    selectors = master_ix.map(lambda x: {dimnames[k]: x[k] for k in dimnum}).values
+    selector_groups, ix_groups = _get_selectors(
+        ciam_in,
+        seg_var,
+        pyciam_seg_chunksize,
+        other_chunksizes,
+        out_ds,
+        client_batchsize,
+    )
 
     #########################################################
     # Run 1st stage (estimate costs for each adaptation type)
     #########################################################
-    print("Queueing jobs to calculate costs for all adaptation scenarios...")
+    # print("Queueing jobs to calculate costs for all adaptation scenarios...")
 
-    # compute in batches so that dask scheduler doesn't get overwhelmed with 1M+ tasks
-    # in case of large workflow
-    n_batches = ceil(len(selectors) / client_batchsize)
-    selector_groups = np.array_split(selectors, n_batches)
-    ix_groups = np.array_split(master_ix, n_batches)
+    # ciam_futs = None
+    # n_selector_groups = len(selector_groups)
+    # for sx, s in enumerate(selector_groups):
+    #     final_batch = (sx + 1) == n_selector_groups
+    #     print(f"computing group {sx + 1} / {n_selector_groups}")
+    #     if check:
+    #         to_run = _check_finished_full_chunk(
+    #             s,
+    #             tmp_output_path,
+    #             client,
+    #             storage_options=storage_options,
+    #         )
+    #     else:
+    #         to_run = s
 
-    def _check_finished(other_selectors, case_selector=CASES[:-1]):
-        return check_finished_zarr_workflow(
-            finalstore=tmp_output_path,
-            varname="costs",
-            final_selector={"case": case_selector, **other_selectors},
-            storage_options=storage_options,
-        )
+    #     if not len(to_run):
+    #         continue
 
-    def _check_finished_full_chunk(
-        selector_group, index_group, case_selector=CASES[:-1]
-    ):
-        is_finished = pd.DataFrame(
-            {"selectors": selector_group, "ix": index_group},
-            index=client.map(
-                _check_finished, selector_group, case_selector=case_selector
-            ),
-        )
-        to_run = []
-        ixs = []
+    #     print(f"...adding {len(to_run)} tasks to queue")
 
-        while len(is_finished):
-            sleep(5)
-            status = np.array([fut.status for fut in is_finished.index])
-            all_futs = is_finished.index[~np.isin(status, ["pending", "processing"])]
-            if not len(all_futs):
-                continue
-            try:
-                finished = client.gather(all_futs.tolist())
-            except FutureCancelledError:
-                continue
+    #     def _calc_all_cases(selector):
+    #         return calc_all_cases(
+    #             selector,
+    #             params=params,
+    #             econ_input_path=econ_input_path,
+    #             slr_input_paths=slr_input_paths,
+    #             slr_names=slr_names,
+    #             output_path=tmp_output_path,
+    #             refA_path=refA_path,
+    #             surge_input_path=surge_input_paths[seg_var],
+    #             seg_var=seg_var,
+    #             mc_dim=mc_dim,
+    #             slr_site_id_dim=slr_site_id_dim,
+    #             lsl_var=lsl_var,
+    #             scen_mc_filter=scen_mc_filter,
+    #             quantiles=quantiles,
+    #             storage_options=storage_options,
+    #             diaz_inputs=diaz_inputs,
+    #             check=check,
+    #             **model_kwargs,
+    #         )
 
-            unfinished = ~np.array(finished)
-            if unfinished.sum():
-                unfinished_futs = all_futs[unfinished]
-                to_run += is_finished.loc[unfinished_futs, "selectors"].tolist()
-                ixs += is_finished.loc[unfinished_futs, "ix"].tolist()
-                del unfinished_futs
+    #     this_futs = pd.Series(
+    #         to_run,
+    #         index=client.map(
+    #             _calc_all_cases,
+    #             to_run,
+    #         ),
+    #     )
+    #     if ciam_futs is None:
+    #         ciam_futs = this_futs
+    #     else:
+    #         ciam_futs = pd.concat((ciam_futs, this_futs))
+    #     del this_futs
 
-            is_finished = is_finished.drop(all_futs)
-            del all_futs
-        return to_run, ixs
+    #     for batch in as_completed(ciam_futs.index.tolist()).batches():
+    #         ciam_futs = _check_completed_fut_batch(
+    #             batch, ciam_futs, client, _calc_all_cases
+    #         )
+    #         del batch
+    #         if ((not final_batch) and len(ciam_futs) < (client_batchsize / 10)) or (
+    #             final_batch and (not len(ciam_futs))
+    #         ):
+    #             break
+    #         sleep(10)
 
-    def _check_completed_fut_batch(batch, futs_ser):
-        status = np.array([fut.status for fut in batch])
-        errored = np.isin(status, ["error", "cancelled"])
-        if sum(errored):
-            bad_futs = np.array(batch)[errored]
-            bad_spec = futs_ser.loc[bad_futs]
-            try:
-                bad_futs[0].result()
-            except FutureCancelledError:
-                sleep(10)
-                client.retry(bad_futs)
-                batch = np.array(batch)[~errored]
-            except Exception:
-                warnings.warn(f"Error in spec: {bad_spec}")
-                raise
-        return futs_ser.drop(batch)
+    # ##############################################
+    # # Run 2nd stage (calculate optimal adaptation)
+    # ##############################################
 
-    ciam_futs = None
-    n_selector_groups = len(selector_groups)
-    for sx, s in enumerate(selector_groups):
-        final_batch = (sx + 1) == n_selector_groups
-        print(f"computing group {sx + 1} / {n_selector_groups}")
-        if check:
-            to_run, this_ix = _check_finished_full_chunk(s, ix_groups[sx])
-        else:
-            to_run = s
-            this_ix = ix_groups[sx]
+    # print("Queueing jobs to optimize adaptation scenario by segment...")
+    # stage_2_futs = None
+    # for sx, s in enumerate(selector_groups):
+    #     final_batch = (sx + 1) == n_selector_groups
+    #     print(f"computing group {sx + 1} / {n_selector_groups}")
+    #     if check:
+    #         to_run = _check_finished_full_chunk(
+    #             s,
+    #             tmp_output_path,
+    #             client,
+    #             storage_options=storage_options,
+    #             case_selector=CASES[-1],
+    #         )
+    #     else:
+    #         to_run = s
 
-        if not len(to_run):
-            continue
+    #     if not len(to_run):
+    #         continue
 
-        print(f"...adding {len(to_run)} tasks to queue")
+    #     print(f"...adding {len(to_run)} tasks to queue")
 
-        this_futs = pd.Series(
-            this_ix,
-            index=client.map(
-                calc_all_cases,
-                to_run,
-                params=params,
-                econ_input_path=econ_input_path,
-                slr_input_paths=slr_input_paths,
-                slr_names=slr_names,
-                output_path=tmp_output_path,
-                refA_path=refA_path,
-                surge_input_path=surge_input_paths[seg_var],
-                seg_var=seg_var,
-                mc_dim=mc_dim,
-                slr_site_id_dim=slr_site_id_dim,
-                lsl_var=lsl_var,
-                scen_mc_filter=scen_mc_filter,
-                quantiles=quantiles,
-                storage_options=storage_options,
-                diaz_inputs=diaz_inputs,
-                check=check,
-                **model_kwargs,
-            ),
-        )
-        if ciam_futs is None:
-            ciam_futs = this_futs
-        else:
-            ciam_futs = pd.concat((ciam_futs, this_futs))
-        del this_futs
+    #     def _optimize_case(selector):
+    #         return optimize_case(
+    #             selector,
+    #             econ_input_path=econ_input_path,
+    #             output_path=tmp_output_path,
+    #             seg_var=seg_var,
+    #             eps=eps,
+    #             check=check,
+    #             storage_options=storage_options,
+    #         )
 
-        for batch in as_completed(ciam_futs.index.tolist()).batches():
-            ciam_futs = _check_completed_fut_batch(batch, ciam_futs)
-            if ((not final_batch) and len(ciam_futs) < (client_batchsize / 10)) or (
-                final_batch and (not len(ciam_futs))
-            ):
-                break
-            sleep(10)
+    #     this_futs = pd.Series(
+    #         to_run,
+    #         index=client.map(
+    #             _optimize_case,
+    #             to_run,
+    #         ),
+    #     )
+    #     if stage_2_futs is None:
+    #         stage_2_futs = this_futs
+    #     else:
+    #         stage_2_futs = pd.concat((stage_2_futs, this_futs))
+    #     del this_futs
 
-    ##############################################
-    # Run 2nd stage (calculate optimal adaptation)
-    ##############################################
-
-    print("Queueing jobs to optimize adaptation scenario by segment...")
-    stage_2_futs = None
-    for sx, s in enumerate(selector_groups):
-        final_batch = (sx + 1) == n_selector_groups
-        print(f"computing group {sx + 1} / {n_selector_groups}")
-        if check:
-            to_run, this_ix = _check_finished_full_chunk(
-                s, ix_groups[sx], case_selector=CASES[-1]
-            )
-        else:
-            to_run = s
-            this_ix = ix_groups[sx]
-
-        if not len(to_run):
-            continue
-
-        print(f"...adding {len(to_run)} tasks to queue")
-        this_futs = pd.Series(
-            this_ix,
-            index=client.map(
-                optimize_case,
-                to_run,
-                econ_input_path=econ_input_path,
-                output_path=tmp_output_path,
-                seg_var=seg_var,
-                eps=eps,
-                check=check,
-                storage_options=storage_options,
-            ),
-        )
-        if stage_2_futs is None:
-            stage_2_futs = this_futs
-        else:
-            stage_2_futs = pd.concat((stage_2_futs, this_futs))
-        del this_futs
-
-        for batch in as_completed(stage_2_futs.index.tolist()).batches():
-            stage_2_futs = _check_completed_fut_batch(batch, stage_2_futs)
-            if ((not final_batch) and len(stage_2_futs) < (client_batchsize / 10)) or (
-                final_batch and (not len(stage_2_futs))
-            ):
-                break
-            sleep(10)
-
-    return stage_2_futs
+    #     for batch in as_completed(stage_2_futs.index.tolist()).batches():
+    #         stage_2_futs = _check_completed_fut_batch(
+    #             batch, stage_2_futs, client, _optimize_case
+    #         )
+    #         del batch
+    #         if ((not final_batch) and len(stage_2_futs) < (client_batchsize / 10)) or (
+    #             final_batch and (not len(stage_2_futs))
+    #         ):
+    #             break
+    #         sleep(10)
 
     ###############################
     # Rechunk and save final
     ###############################
-    def postprocess(ds):
-        if postprocess_func is None:
-            return ds
-        return postprocess_func(ds)
 
-    # final output will be aggregated across segments within each adm region. We first
-    # create the appropriate template for a single IR and then later expand dims
-    template = postprocess(
-        xr.open_zarr(str(tmp_output_path)).isel({seg_var: 0}, drop=True)
-    ).chunk(-1)
-
-    # want chunks to be roughly 100MB in size
-    adm_chunksize = ceil(100 / (template.costs.nbytes / 2**20))
-    seg_chunksize = ceil(100 / (template.optimal_case.nbytes / 2**20))
-
-    # get unique adms in same order as they appear in seg_ir
-    adms = ciam_in[adm_var].load()
-    segs = ciam_in.seg.load()
-    adms_unique = adms.values[np.sort(np.unique(adms, return_index=True)[1])]
-    segs_unique = segs.values[np.sort(np.unique(segs, return_index=True)[1])]
-
-    # expand dims across adm regions and segs
-    template["costs"] = template.costs.expand_dims({adm_var: adms_unique}).chunk(
-        {adm_var: adm_chunksize}
+    _aggregate_results(
+        tmp_output_path,
+        output_path,
+        econ_input_path,
+        seg_var,
+        adm_var,
+        mc_dim,
+        client,
+        postprocess_func=postprocess_func,
+        scen_mc_filter=scen_mc_filter,
+        overwrite=overwrite,
+        storage_options=storage_options,
     )
-    template["optimal_case"] = template.optimal_case.expand_dims(seg=segs_unique).chunk(
-        {"seg": seg_chunksize}
-    )
-
-    # provide scenario and sample coords if needed
-    if "scen_mc" in template.dims:
-        template = template.assign_coords(
-            scenario=("scen_mc", scen_mc_filter.get_level_values("scenario")),
-            sample=("scen_mc", scen_mc_filter.get_level_values("sample")),
-        )
-
-    # clean up before saving
-    template = template.unify_chunks().drop_encoding()
-
-    # save
-    if overwrite or not output_path.exists():
-        template.to_zarr(str(output_path), mode="w", compute=False)
-
-    # funcs to map
-    def _aggregate_costs_to_adm(adms, adm_groups):
-        if check_finished_zarr_workflow(
-            finalstore=output_path,
-            varname="costs",
-            final_selector={adm_var: adms},
-            storage_options=storage_options,
-        ):
-            return None
-        out = []
-        all_adm_groups = np.concatenate(adm_groups.loc[adms].values)
-        dims = xr.open_zarr(str(tmp_output_path), chunks=None).dims
-        full_input = postprocess(
-            xr.open_zarr(
-                str(tmp_output_path),
-                chunks={
-                    d: -1
-                    for d in dims
-                    if d not in [seg_var, "scenario", mc_dim, "scen_mc"]
-                },
-            ).sel({seg_var: all_adm_groups})
-        )
-        # aggregating costs and npv, accounting for whether postprocess func dropped either
-        full_input = full_input[
-            [c for c in ["costs", "npv"] if c in full_input.data_vars]
-        ]
-        for adm in adms:
-            this_out = full_input.sel({seg_var: adm_groups.loc[adm]})
-            ix_start = np.concatenate([[0], np.cumsum(this_out.chunksizes[seg_var])])
-            this_sum = 0
-            with dask.config.set(scheduler="single-threaded"):
-                for ix in range(len(ix_start) - 1):
-                    this_sum += (
-                        this_out.isel(
-                            {seg_var: slice(ix_start[ix], ix_start[ix + 1])}, drop=True
-                        )
-                        .load()
-                        .sum(seg_var)
-                    )
-            out.append(this_sum)
-        out = xr.concat(out, dim=xr.DataArray(adms, dims=[adm_var])).drop_encoding()
-        if out.to_array().isnull().any():
-            raise ValueError("Null values found.")
-        out.drop_encoding().to_zarr(str(output_path), region="auto")
-
-    def _aggregate_optimal_case_to_seg(segs, seg_map):
-        if check_finished_zarr_workflow(
-            finalstore=output_path,
-            varname="optimal_case",
-            final_selector={"seg": segs},
-            storage_options=storage_options,
-        ):
-            return None
-        all_seg_adms = seg_map.sel(seg=segs)
-        dims = xr.open_zarr(str(tmp_output_path), chunks=None).dims
-        out = postprocess(
-            xr.open_zarr(
-                str(tmp_output_path), chunks={d: -1 for d in dims if d != seg_var}
-            )
-            .sel({seg_var: all_seg_adms})
-            .drop_vars(seg_var)
-        )[["optimal_case"]]
-        with dask.config.set(scheduler="single-threaded"):
-            out = out.load()
-        if out.to_array().isnull().any():
-            raise ValueError("Null values found.")
-        out.drop_encoding().to_zarr(str(output_path), region="auto")
-
-    def _get_adm_groups():
-        return (
-            xr.open_zarr(str(econ_input_path), chunks=None)[adm_var]
-            .to_series()
-            .reset_index()
-            .set_index(adm_var)[seg_var]
-            .groupby(adm_var)
-            .apply(list)
-            .loc[adms_unique]
-        )
-
-    def _get_seg_map():
-        return (
-            xr.open_zarr(str(econ_input_path), chunks=None)
-            .seg.to_series()
-            .reset_index()
-            .set_index("seg")[seg_var]
-            .groupby("seg")
-            .first()
-            .loc[segs_unique]
-            .to_xarray()
-        )
-
-    adm_groups = np.array_split(adms_unique, ceil(len(adms_unique) / adm_chunksize))
-    seg_groups = np.array_split(segs_unique, ceil(len(segs_unique) / seg_chunksize))
-    seg_fut = client.submit(_get_seg_map)
-    adm_fut = client.submit(_get_adm_groups)
-
-    final_futs = pd.Series(
-        adm_groups,
-        index=client.map(_aggregate_costs_to_adm, adm_groups, adm_groups=adm_fut),
-    )
-    final_futs = pd.concat(
-        (
-            final_futs,
-            pd.Series(
-                seg_groups,
-                index=client.map(
-                    _aggregate_optimal_case_to_seg, seg_groups, seg_map=seg_fut
-                ),
-            ),
-        )
-    )
-
-    for batch in as_completed(final_futs.index.tolist()).batches():
-        final_futs = _check_completed_fut_batch(batch, final_futs)
-        if not len(final_futs):
-            break
-        sleep(10)
 
     ###############################
     # Final checks and cleanup
