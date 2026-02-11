@@ -1562,12 +1562,6 @@ def execute_pyciam(
     params = pd.read_json(params_path)["values"]
     params.update(params_override)
 
-    # determine whether to check for finished jobs
-    if output_path is None:
-        check = False
-    else:
-        check = True
-
     attr_dict = {
         "updated": pd.Timestamp.now(tz="US/Pacific").strftime("%c"),
         "planning_period_start_years": params.at_start,
